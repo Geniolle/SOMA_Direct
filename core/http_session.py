@@ -23,20 +23,43 @@ class ResilientSession:
         "X-Requested-With": "XMLHttpRequest",
     }
 
-    def __init__(self, timeout: int = 25):
+    def __init__(self, timeout: int = 35, max_retries: int = 3):
         self.session = requests.Session()
         self.session.headers.update(self.DEFAULT_HEADERS)
         self.timeout = timeout
+        self.max_retries = max_retries
 
     def get(self, url: str, params: Optional[Dict[str, Any]] = None, **kwargs) -> requests.Response:
         kwargs.setdefault("timeout", self.timeout)
         kwargs.setdefault("verify", False)
-        return self.session.get(url, params=params, **kwargs)
+        retries = kwargs.pop("retries", self.max_retries)
+        for attempt in range(1, retries + 1):
+            try:
+                return self.session.get(url, params=params, **kwargs)
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                if attempt == retries:
+                    logger.error("Falha final GET %s apos %d tentativas: %s", url, retries, e)
+                    raise
+                wait = attempt * 2
+                logger.warning("Erro de conexao/timeout no GET %s (tentativa %d/%d). Aguardando %ds: %s", url, attempt, retries, wait, e)
+                import time
+                time.sleep(wait)
 
     def post(self, url: str, data: Optional[Any] = None, files: Optional[Any] = None, **kwargs) -> requests.Response:
         kwargs.setdefault("timeout", self.timeout)
         kwargs.setdefault("verify", False)
-        return self.session.post(url, data=data, files=files, **kwargs)
+        retries = kwargs.pop("retries", self.max_retries)
+        for attempt in range(1, retries + 1):
+            try:
+                return self.session.post(url, data=data, files=files, **kwargs)
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                if attempt == retries:
+                    logger.error("Falha final POST %s apos %d tentativas: %s", url, retries, e)
+                    raise
+                wait = attempt * 2
+                logger.warning("Erro de conexao/timeout no POST %s (tentativa %d/%d). Aguardando %ds: %s", url, attempt, retries, wait, e)
+                import time
+                time.sleep(wait)
 
     def post_ajax(self, url: str, data: Optional[Any] = None, **kwargs) -> requests.Response:
         headers = kwargs.pop("headers", {})
