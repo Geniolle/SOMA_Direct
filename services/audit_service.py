@@ -247,15 +247,27 @@ class AuditService:
         new_desc: Optional[str] = None,
         is_correction: bool = False,
     ) -> AuditOutcome:
-        dados_doc_site = self.fetch_dados_doc(matched_doc)
         sheet_dados = str(row.dados_doc or "").strip()
-        dados_doc_final = dados_doc_site or sheet_dados
+        dados_doc_site = ""
 
-        dados_valido, dados_err = validate_dados_doc(
-            dados_doc=dados_doc_final,
-            sheet_caixa=row.caixa,
-            sheet_forma=row.forma_pagamento,
-        )
+        # Se já temos DADOS DOC na sheet e ele valida com Caixa e Forma, usamos diretamente (hiper-rápido)
+        dados_valido = False
+        dados_err = None
+        if sheet_dados and not is_correction:
+            dados_valido, dados_err = validate_dados_doc(
+                dados_doc=sheet_dados,
+                sheet_caixa=row.caixa,
+                sheet_forma=row.forma_pagamento,
+            )
+
+        # Se não temos ou a validação local falhou/era correção, consulta a página de detalhes no portal
+        if not dados_valido:
+            dados_doc_site = self.fetch_dados_doc(matched_doc)
+            dados_valido, dados_err = validate_dados_doc(
+                dados_doc=dados_doc_site or sheet_dados,
+                sheet_caixa=row.caixa,
+                sheet_forma=row.forma_pagamento,
+            )
 
         if not dados_valido:
             logger.warning(f"Linha {row.row_number}: Falha Caixa/Forma em DADOS DOC ({dados_err})")
@@ -263,7 +275,7 @@ class AuditService:
                 analyzed=True,
                 inconsistent=True,
                 inconsistencies=[dados_err or "DADOS DOC inválido"],
-                dados_doc=dados_doc_site,
+                dados_doc=dados_doc_site or sheet_dados,
             )
 
         if is_correction:
@@ -276,15 +288,16 @@ class AuditService:
                 corrected=True,
                 new_doc=matched_doc,
                 new_desc=new_desc,
-                dados_doc=dados_doc_site,
+                dados_doc=dados_doc_site or sheet_dados,
             )
 
         logger.info(f"Linha {row.row_number}: Confirmado com sucesso! (DOC {matched_doc})")
         return AuditOutcome(
             analyzed=True,
             confirmed=True,
-            dados_doc=dados_doc_site,
+            dados_doc=dados_doc_site or sheet_dados,
         )
+
 
     def audit_row(self, row: ContaOrdemRow) -> AuditOutcome:
         """Audita uma única linha seguindo a cascata de 3 etapas com validação de DADOS DOC."""

@@ -167,8 +167,9 @@ class DirectOrchestrator:
 
         return outcomes
 
-    def audit_pending(self, limit: Optional[int] = None, batch_size: int = 25, dry_run: bool = False):
+    def audit_pending(self, limit: Optional[int] = None, batch_size: int = 50, dry_run: bool = False):
         """Executa auditoria em massa de todas as linhas pendentes."""
         self.auth.login()
         return self.audit_service.audit_all(limit=limit, batch_size=batch_size, update_sheet=not dry_run)
+
 
