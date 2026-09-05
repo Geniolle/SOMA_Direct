@@ -38,12 +38,15 @@ def main():
     setup_logging()
 
     parser = argparse.ArgumentParser(description="SOMA Direct - Motor de Alta Velocidade para o Portal SOMA")
-    parser.add_argument("rows", nargs="*", type=int, help="Números de linhas pontuais para processar")
+    parser.add_argument("rows", nargs="*", type=int, help="Números de linhas pontuais para processar ou auditar")
+    parser.add_argument("--mode", choices=["launch", "audit"], default="launch", help="Modo de operação: launch (lançamento) ou audit (auditoria)")
+    parser.add_argument("--audit", action="store_true", help="Atalho para --mode audit")
     parser.add_argument("--pending", action="store_true", help="Processa todas as linhas pendentes da planilha CONTAORDEM")
-    parser.add_argument("--limit", type=int, default=0, help="Limite de linhas a processar (quando usado com --pending)")
+    parser.add_argument("--limit", type=int, default=0, help="Limite de linhas a processar/auditar")
     parser.add_argument("--dry-run", action="store_true", help="Executa no modo de simulação (sem gravar no SOMA nem na planilha)")
 
     args = parser.parse_args()
+    mode = "audit" if args.audit else args.mode
 
     print("=" * 75)
     print(">>> SOMA DIRECT (MOTOR HTTP MODULAR E DE ALTA VELOCIDADE) <<<")
@@ -52,6 +55,24 @@ def main():
     orchestrator = DirectOrchestrator()
     t0 = time.perf_counter()
 
+    if mode == "audit":
+        print(f"Modo: AUDITORIA E CONCILIAÇÃO (DryRun={args.dry_run})\n")
+        if args.rows:
+            print(f"Linhas alvo: {args.rows}")
+            outcomes = orchestrator.audit_target_rows(args.rows, dry_run=args.dry_run)
+            total_time = time.perf_counter() - t0
+            print("\n" + "=" * 75)
+            print(f"RESULTADOS DA AUDITORIA (Tempo Total: {total_time:.2f}s):")
+            for idx, o in zip(args.rows, outcomes):
+                status_txt = "CONFIRMADO" if o.confirmed else ("CORRIGIDO" if o.corrected else "INCONSISTENTE")
+                extra = f" -> Novo DOC={o.new_doc}" if o.corrected else ""
+                print(f"  Linha {idx:4d}: Resultado={status_txt:14s}{extra}")
+            print("=" * 75)
+        else:
+            orchestrator.audit_pending(limit=args.limit, dry_run=args.dry_run)
+        return
+
+    # Modo: Lançamento
     if args.pending:
         print(f"Modo: PROCESSAMENTO DE PENDENTES (Limite={args.limit or 'Sem limite'}, DryRun={args.dry_run})\n")
         outcomes = orchestrator.run_pending(limit=args.limit, dry_run=args.dry_run)
@@ -76,3 +97,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

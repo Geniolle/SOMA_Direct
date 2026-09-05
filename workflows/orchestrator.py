@@ -6,7 +6,8 @@ from typing import List, Optional
 from config.settings import Settings
 from core.auth import SomaAuthenticator
 from core.http_session import ResilientSession
-from domain.models import ContaOrdemRow, OperationOutcome, TipoMovimento
+from domain.models import AuditOutcome, ContaOrdemRow, OperationOutcome, TipoMovimento
+from services.audit_service import AuditService
 from services.duplicate_checker import DuplicateChecker
 from services.sheets_service import GoogleSheetsService
 from services.soma_api_service import SomaApiService
@@ -24,6 +25,7 @@ class DirectOrchestrator:
         self.api = SomaApiService(self.settings, self.http)
         self.duplicate_checker = DuplicateChecker(self.api)
         self.sheets = GoogleSheetsService(self.settings)
+        self.audit_service = AuditService(self.settings, self.http, self.sheets)
 
     def initialize(self) -> bool:
         """Autentica na sessão HTTP e carrega catálogos de apoio."""
@@ -132,3 +134,41 @@ class DirectOrchestrator:
         total_ms = int((time.perf_counter() - overall_t0) * 1000)
         logger.info(f"=== BATCH PENDENTES FINALIZADO: {len(outcomes)} linhas em {total_ms/1000:.2f}s ===")
         return outcomes
+
+    def audit_target_rows(self, row_indices: List[int], dry_run: bool = False) -> List[AuditOutcome]:
+        """Audita uma lista de linhas especificadas."""
+        self.auth.login()
+        outcomes: List[AuditOutcome] = []
+        updates = []
+
+        for idx in row_indices:
+            row = self.sheets.get_row(idx)
+            if not row:
+                logger.error(f"Linha {idx} não encontrada na planilha!")
+                continue
+            logger.info(f"Auditando Linha {idx}: DOC={row.doc_soma} [{row.tipo.value}]...")
+            outcome = self.audit_service.audit_row(row)
+            outcomes.append(outcome)
+
+            status_str = "ERRO" if outcome.inconsistent and "DADOS DOC" in "; ".join(outcome.inconsistencies) else None
+            aud_str = "Confirmado" if outcome.confirmed else ("Corrigido" if outcome.corrected else "Inconsistente")
+
+            updates.append({
+                "row_idx": idx,
+                "auditoria": aud_str,
+                "new_doc": outcome.new_doc,
+                "new_desc": outcome.new_desc,
+                "dados_doc": outcome.dados_doc if outcome.dados_doc != row.dados_doc else None,
+                "status": status_str,
+            })
+
+        if not dry_run and updates:
+            self.sheets.batch_update_audit_records(updates)
+
+        return outcomes
+
+    def audit_pending(self, limit: Optional[int] = None, batch_size: int = 25, dry_run: bool = False):
+        """Executa auditoria em massa de todas as linhas pendentes."""
+        self.auth.login()
+        return self.audit_service.audit_all(limit=limit, batch_size=batch_size, update_sheet=not dry_run)
+
