@@ -42,6 +42,7 @@ def main():
     parser.add_argument("--mode", choices=["launch", "audit"], default="launch", help="Modo de operação: launch (lançamento) ou audit (auditoria)")
     parser.add_argument("--audit", action="store_true", help="Atalho para --mode audit")
     parser.add_argument("--pending", action="store_true", help="Processa todas as linhas pendentes da planilha CONTAORDEM")
+    parser.add_argument("--revalidate-inconsistent", action="store_true", help="Revalida linhas com status Inconsistente e grava o motivo detalhado do erro")
     parser.add_argument("--limit", type=int, default=0, help="Limite de linhas a processar/auditar")
     parser.add_argument("--dry-run", action="store_true", help="Executa no modo de simulação (sem gravar no SOMA nem na planilha)")
 
@@ -55,7 +56,13 @@ def main():
     orchestrator = DirectOrchestrator()
     t0 = time.perf_counter()
 
+    if args.revalidate_inconsistent:
+        print(f"Modo: REVALIDAÇÃO DETALHADA DE INCONSISTÊNCIAS (DryRun={args.dry_run})\n")
+        orchestrator.revalidate_inconsistent(dry_run=args.dry_run)
+        return
+
     if mode == "audit":
+
         print(f"Modo: AUDITORIA E CONCILIAÇÃO (DryRun={args.dry_run})\n")
         if args.rows:
             print(f"Linhas alvo: {args.rows}")

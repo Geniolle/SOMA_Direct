@@ -463,3 +463,154 @@ class AuditService:
         print("=" * 70 + "\n")
 
         return stats
+
+    def get_detailed_inconsistency_message(self, row: ContaOrdemRow) -> str:
+        """Gera mensagem explicativa e concisa para a coluna AUDITORIA em vez de apenas 'Inconsistente'."""
+        doc = normalize_document_value(row.doc_soma)
+
+        # 1. Não numérico ou vazio
+        if not doc:
+            return "DOC. SOMA vazio na folha"
+        if not doc.isdigit():
+            return f"DOC não numérico ('{doc}')"
+
+        # 2. Busca por código
+        search_res = self.search_by_codigo(doc)
+        if search_res is None:
+            return f"Código {doc} não existe no SOMA"
+
+        # 3. Validação das 7 colunas
+        val_status, incs = self.validate_soma_record(row, search_res)
+        if not incs:
+            dados_site = self.fetch_dados_doc(doc)
+            _, err = validate_dados_doc(dados_site or row.dados_doc, row.caixa, row.forma_pagamento)
+            if err:
+                return err[:85]
+            return "DADOS DOC inválido ou ausente"
+
+        has_val = any("VALOR" in i for i in incs)
+        has_desc = any("DESCRIÇÃO" in i for i in incs)
+        has_tipo = any("TIPO" in i for i in incs)
+        has_data = any("DATA" in i for i in incs)
+        has_status = any("STATUS" in i for i in incs)
+        has_baixa = any("BAIXA" in i for i in incs)
+
+        if has_status or has_baixa:
+            return f"Não quitado no SOMA (Status={search_res.status} / Baixa={search_res.baixa})"
+
+        if has_val and has_desc:
+            desc_abbrev = search_res.descricao[:25].strip()
+            return f"DOC cruzado (SOMA: {desc_abbrev} | {search_res.valor} €)"
+
+        if has_tipo:
+            return f"Tipo divergente: site={search_res.tipo} != sheet={row.tipo.value}"
+
+        if has_val:
+            return f"Valor divergente: site={search_res.valor} € != sheet={row.importancia} €"
+
+        if has_desc:
+            desc_abbrev = search_res.descricao[:30].strip()
+            return f"Descrição divergente: site='{desc_abbrev}'"
+
+        if has_data:
+            return f"Data divergente: site={search_res.data} != sheet={row.data_mov}"
+
+        return "; ".join(incs)[:75]
+
+    def revalidate_inconsistencies(
+        self,
+        batch_size: int = 50,
+        update_sheet: bool = True,
+    ) -> Dict[str, Any]:
+        """Revalida todas as linhas marcadas como 'Inconsistente' e substitui pelo motivo detalhado do erro."""
+        t0 = time.perf_counter()
+        logger.info("Carregando registros inconsistentes para revalidação detalhada...")
+
+        all_rows = self.sheets.get_all_rows()
+        inconsistent_rows = [r for r in all_rows if r.auditoria.strip() == "Inconsistente"]
+        total_rows = len(inconsistent_rows)
+
+        print(f"\n[REVALIDAÇÃO DE INCONSISTÊNCIAS] Total de linhas: {total_rows}\n", flush=True)
+
+        stats = {
+            "total": total_rows,
+            "confirmed_now": 0,
+            "corrected_now": 0,
+            "detailed_errors": 0,
+            "errors": 0,
+        }
+
+        updates_buffer: List[Dict[str, Any]] = []
+
+        for idx, row in enumerate(inconsistent_rows, start=1):
+            t_row = time.perf_counter()
+            try:
+                # 1. Tenta auditoria completa primeiro (caso agora passe como Confirmado ou Corrigido)
+                outcome = self.audit_row(row)
+                if outcome.confirmed:
+                    stats["confirmed_now"] += 1
+                    aud_text = "Confirmado"
+                    new_doc = None
+                    new_desc = None
+                    status_str = None
+                elif outcome.corrected:
+                    stats["corrected_now"] += 1
+                    aud_text = "Corrigido"
+                    new_doc = outcome.new_doc
+                    new_desc = outcome.new_desc
+                    status_str = None
+                else:
+                    stats["detailed_errors"] += 1
+                    aud_text = self.get_detailed_inconsistency_message(row)
+                    new_doc = None
+                    new_desc = None
+                    status_str = "ERRO" if ("DADOS DOC" in aud_text or "CAIXA" in aud_text or "FORMA" in aud_text) else None
+
+                updates_buffer.append({
+                    "row_idx": row.row_number,
+                    "auditoria": aud_text,
+                    "new_doc": new_doc,
+                    "new_desc": new_desc,
+                    "dados_doc": outcome.dados_doc if outcome.dados_doc and outcome.dados_doc != row.dados_doc else None,
+                    "status": status_str,
+                })
+
+                elapsed_ms = int((time.perf_counter() - t_row) * 1000)
+                logger.debug(f"Linha {row.row_number} revalidada em {elapsed_ms}ms -> {aud_text}")
+
+            except Exception as e:
+                stats["errors"] += 1
+                logger.exception(f"Erro na revalidação da linha {row.row_number}: {e}")
+
+            if update_sheet and len(updates_buffer) >= batch_size:
+                self.sheets.batch_update_audit_records(updates_buffer)
+                updates_buffer.clear()
+
+            if idx % 10 == 0 or idx == total_rows:
+                pct = (idx / total_rows) * 100 if total_rows > 0 else 100
+                print(
+                    f"Progresso: {idx}/{total_rows} ({pct:.1f}%) | "
+                    f"Confirmados: {stats['confirmed_now']} | Corrigidos: {stats['corrected_now']} | "
+                    f"Erros detalhados: {stats['detailed_errors']}",
+                    flush=True,
+                )
+
+        if update_sheet and updates_buffer:
+            self.sheets.batch_update_audit_records(updates_buffer)
+            updates_buffer.clear()
+
+        total_elapsed = time.perf_counter() - t0
+        stats["total_elapsed_sec"] = round(total_elapsed, 2)
+
+        print("\n" + "=" * 70)
+        print("RESUMO DA REVALIDAÇÃO DE INCONSISTÊNCIAS")
+        print("=" * 70)
+        print(f"Total revalidado:           {stats['total']}")
+        print(f"Passaram para Confirmado:   {stats['confirmed_now']}")
+        print(f"Passaram para Corrigido:    {stats['corrected_now']}")
+        print(f"Atualizados com Erro Real:  {stats['detailed_errors']}")
+        print(f"Tempo total:                {stats['total_elapsed_sec']} segundos")
+        print("=" * 70 + "\n")
+
+        return stats
+

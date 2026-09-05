@@ -172,4 +172,10 @@ class DirectOrchestrator:
         self.auth.login()
         return self.audit_service.audit_all(limit=limit, batch_size=batch_size, update_sheet=not dry_run)
 
+    def revalidate_inconsistent(self, batch_size: int = 50, dry_run: bool = False):
+        """Revalida as linhas inconsistentes e grava a mensagem detalhada do erro na folha."""
+        self.auth.login()
+        return self.audit_service.revalidate_inconsistencies(batch_size=batch_size, update_sheet=not dry_run)
+
+
 
