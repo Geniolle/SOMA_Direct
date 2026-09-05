@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "soma-direct"
+version = "1.0.0"
+description = "Motor HTTP direto e modular de alta velocidade para integracao com SOMA"
+authors = [{ name = "Equipe SOMA" }]
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31.0",
+    "gspread>=6.0.0",
+    "python-dotenv>=1.0.0",
+    "urllib3>=2.0.0"
+]
+
+[project.scripts]
+soma-direct = "main:main"
