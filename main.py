@@ -87,10 +87,9 @@ def main():
         print(f"Modo: LINHAS ESPECIFICADAS -> {args.rows} (DryRun={args.dry_run})\n")
         outcomes = orchestrator.run_target_rows(args.rows, dry_run=args.dry_run)
     else:
-        # Padrão: processa as 3 linhas de teste
-        default_rows = [4248, 4246, 4247]
-        print(f"Modo padrão: LINHAS DE TESTE -> {default_rows} (DryRun={args.dry_run})\n")
-        outcomes = orchestrator.run_target_rows(default_rows, dry_run=args.dry_run)
+        # Padrão: sem linhas/flag informadas, processa os pendentes reais da planilha
+        print(f"Modo padrão: PROCESSAMENTO DE PENDENTES (Limite={args.limit or 'Sem limite'}, DryRun={args.dry_run})\n")
+        outcomes = orchestrator.run_pending(limit=args.limit, dry_run=args.dry_run)
 
     total_time = time.perf_counter() - t0
 

@@ -9,6 +9,7 @@ from config.settings import Settings
 from core.http_session import ResilientSession
 from domain.models import (
     AuditOutcome,
+    CascadeAuditOutcome,
     ContaOrdemRow,
     SomaSearchResult,
     TipoMovimento,
@@ -613,4 +614,156 @@ class AuditService:
         print("=" * 70 + "\n")
 
         return stats
+
+    def audit_row_cascade(
+        self,
+        row: ContaOrdemRow,
+        date_batch_items: Optional[List[SomaSearchResult]] = None,
+        used_soma_codes: Optional[set[str]] = None,
+        origin_doc: Optional[str] = None,
+    ) -> CascadeAuditOutcome:
+        """
+        Hierarquia de Auditoria e Reconciliação em 4 Níveis:
+        Nível 1: Validação Direta por Código (DOC. SOMA)
+        Nível 2: Reconciliação por Lote de Datas (Date-Batch Allocation 1-para-1)
+        Nível 3: Reconciliação Semântica e Descritiva (Normalização textual & sufixos Nxxx)
+        Nível 4: Confronto com a Fonte de Origem (ID_INTERNO em T_EXTRATO, VC_VENDAS, etc.)
+        """
+        if used_soma_codes is None:
+            used_soma_codes = set()
+
+        tipo_str = norm_basic(row.tipo.value if row.tipo else "")
+        doc_str = normalize_document_value(row.doc_soma)
+        clean_val = clean_amount_for_comparison(row.importancia)
+        desc_str = norm_basic(row.descricao_soma or row.descricao)
+
+        # Fast-path: Movimentações Internas (Transferências, MVV e Cartão Consolidado)
+        if tipo_str in ("transferencia", "mvv") or doc_str.lower() in ("transferido", "mvv"):
+            return CascadeAuditOutcome(
+                confirmed=True,
+                level_resolved=1,
+                auditoria="Confirmado",
+                notes="Transferência Interna / MVV",
+            )
+
+        if doc_str.upper() == "PAGTO CARTAO" or tipo_str == "cartao" or "pag.cartao" in desc_str:
+            return CascadeAuditOutcome(
+                confirmed=True,
+                level_resolved=1,
+                auditoria="Confirmado",
+                notes="Pagamento de Cartão Consolidado",
+            )
+
+        # Mapear itens da data
+        soma_items_on_date = date_batch_items or []
+        soma_codes_on_date = {it.codigo: it for it in soma_items_on_date}
+
+        # -------------------------------------------------------------
+        # NÍVEL 1: Checagem Direta por Código (DOC. SOMA)
+        # -------------------------------------------------------------
+        divergent_val_found = None
+        if doc_str.isdigit():
+            target_item: Optional[SomaSearchResult] = None
+            if doc_str in soma_codes_on_date:
+                target_item = soma_codes_on_date[doc_str]
+            elif self.settings and self.http:
+                target_item = self.search_by_codigo(doc_str)
+
+            if target_item:
+                site_val = clean_amount_for_comparison(target_item.valor)
+                if site_val == clean_val:
+                    used_soma_codes.add(doc_str)
+                    return CascadeAuditOutcome(
+                        confirmed=True,
+                        level_resolved=1,
+                        auditoria="Confirmado",
+                        new_doc=doc_str,
+                        new_desc=target_item.descricao,
+                        notes="DOC direto conferido com sucesso",
+                    )
+                else:
+                    divergent_val_found = target_item.valor
+
+        # -------------------------------------------------------------
+        # NÍVEL 2: Reconciliação por Lote de Datas (Date-Batch Matching)
+        # -------------------------------------------------------------
+        available_matches = [
+            it for it in soma_items_on_date
+            if it.codigo not in used_soma_codes and clean_amount_for_comparison(it.valor) == clean_val
+        ]
+
+        if len(available_matches) == 1:
+            matched = available_matches[0]
+            used_soma_codes.add(matched.codigo)
+            is_corrigido = (doc_str != matched.codigo)
+            return CascadeAuditOutcome(
+                confirmed=True,
+                corrected=is_corrigido,
+                level_resolved=2,
+                auditoria="Corrigido" if is_corrigido else "Confirmado",
+                new_doc=matched.codigo,
+                new_desc=matched.descricao,
+                notes="DOC alocado 1-para-1 por Lote de Data",
+            )
+
+        # Se múltiplos matches de mesmo valor, desempata pelo Nível 3 (Semântica)
+        if len(available_matches) > 1:
+            # -------------------------------------------------------------
+            # NÍVEL 3: Análise Semântica e Descritiva
+            # -------------------------------------------------------------
+            base_sheet = norm_basic(strip_suffix_n(row.descricao))
+            best_cand = None
+            for cand in available_matches:
+                base_cand = norm_basic(strip_suffix_n(cand.descricao))
+                if base_sheet in base_cand or base_cand in base_sheet:
+                    best_cand = cand
+                    break
+            if not best_cand:
+                best_cand = available_matches[0]
+
+            used_soma_codes.add(best_cand.codigo)
+            is_corrigido = (doc_str != best_cand.codigo)
+            return CascadeAuditOutcome(
+                confirmed=True,
+                corrected=is_corrigido,
+                level_resolved=3,
+                auditoria="Corrigido" if is_corrigido else "Confirmado",
+                new_doc=best_cand.codigo,
+                new_desc=best_cand.descricao,
+                notes="DOC alocado por proximidade semântica no lote",
+            )
+
+        # -------------------------------------------------------------
+        # NÍVEL 4: Confronto com a Fonte de Origem (ID_INTERNO)
+        # -------------------------------------------------------------
+        if origin_doc is not None and not origin_doc.strip():
+            return CascadeAuditOutcome(
+                confirmed=False,
+                level_resolved=4,
+                auditoria="Pendente lançamento SOMA",
+                notes="Origem sem DOC cadastrado",
+            )
+
+        if divergent_val_found:
+            return CascadeAuditOutcome(
+                confirmed=False,
+                level_resolved=1,
+                auditoria=f"Valor divergente: site={divergent_val_found} != sheet={row.importancia}",
+                notes="DOC existe mas com valor diferente e sem match no lote",
+            )
+
+        if doc_str.isdigit():
+            return CascadeAuditOutcome(
+                confirmed=False,
+                level_resolved=1,
+                auditoria=f"Código {doc_str} não existe no SOMA",
+                notes="DOC não encontrado no SOMA e sem substituto na data",
+            )
+
+        return CascadeAuditOutcome(
+            confirmed=False,
+            level_resolved=4,
+            auditoria="Pendente lançamento SOMA",
+            notes="Sem DOC e sem correspondência na data",
+        )
 

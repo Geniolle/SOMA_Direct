@@ -117,8 +117,7 @@ class DirectOrchestrator:
         pending = []
         for r in all_rows:
             doc = (r.doc_soma or "").strip().upper()
-            status = (r.status or "").strip().upper()
-            if not doc or doc == "TESTE" or doc.startswith("SEM_DOC") or status not in ("VALIDADO", "OK"):
+            if not doc or doc in ("EM PROCESSAMENTO", "EM ERRO"):
                 pending.append(r)
 
         if limit and limit > 0:

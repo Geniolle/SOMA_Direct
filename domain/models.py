@@ -138,11 +138,11 @@ class ContaOrdemRow:
     importancia: str
     doc_soma: str
     tipo: TipoMovimento
-    plano_conta: str
-    centro_custo: str
-    descricao_soma: str
-    forma_pagamento: str
-    caixa: str
+    plano_conta: str = ""
+    centro_custo: str = ""
+    descricao_soma: str = ""
+    forma_pagamento: str = ""
+    caixa: str = ""
     caixa_saida: str = ""
     id_interno: str = ""
     status: str = ""
@@ -190,8 +190,8 @@ class SomaSearchResult:
     descricao: str
     valor: str
     data: str
-    status: str
-    baixa: str
+    status: str = ""
+    baixa: str = ""
 
 
 @dataclass
@@ -216,4 +216,17 @@ class OperationOutcome:
     elapsed_ms: int
     dados_doc: str = ""
     error_message: str = ""
+
+
+@dataclass
+class CascadeAuditOutcome:
+    """Resultado da conciliação em cascata (4 níveis hierárquicos)."""
+    confirmed: bool = False
+    corrected: bool = False
+    level_resolved: int = 0  # 1: DOC direto, 2: Lote Data, 3: Semântico, 4: Origem
+    auditoria: str = ""
+    new_doc: Optional[str] = None
+    new_desc: Optional[str] = None
+    dados_doc: str = ""
+    notes: str = ""
 

@@ -114,3 +114,120 @@ def test_matches_ignoring_code_and_suffix():
     matched, desc_differs = service.matches_ignoring_code_and_suffix(row, res)
     assert matched is True
     assert desc_differs is True
+
+
+def test_audit_row_cascade_level_1_direct():
+    service = AuditService(settings=None, http=None, sheets=None)
+    row = ContaOrdemRow(
+        row_number=10,
+        data_mov="04/07/2026",
+        descricao="PAGAMENTO FORNECEDOR",
+        importancia="150,00",
+        doc_soma="5500111",
+        tipo=TipoMovimento.SAIDA,
+    )
+    res = SomaSearchResult(
+        codigo="5500111",
+        tipo="SAÍDA",
+        descricao="PAGAMENTO FORNECEDOR",
+        valor="150,00",
+        data="04/07/2026",
+    )
+    outcome = service.audit_row_cascade(row, date_batch_items=[res])
+    assert outcome.confirmed is True
+    assert outcome.level_resolved == 1
+    assert outcome.auditoria == "Confirmado"
+    assert outcome.new_doc == "5500111"
+
+
+def test_audit_row_cascade_level_1_transfer():
+    service = AuditService(settings=None, http=None, sheets=None)
+    row = ContaOrdemRow(
+        row_number=11,
+        data_mov="04/07/2026",
+        descricao="TRANSFERENCIA ENTRE CONTAS",
+        importancia="500,00",
+        doc_soma="TRANSFERIDO",
+        tipo=TipoMovimento.TRANSFERENCIA,
+    )
+    outcome = service.audit_row_cascade(row)
+    assert outcome.confirmed is True
+    assert outcome.level_resolved == 1
+    assert outcome.auditoria == "Confirmado"
+
+
+def test_audit_row_cascade_level_2_date_batch():
+    service = AuditService(settings=None, http=None, sheets=None)
+    row = ContaOrdemRow(
+        row_number=12,
+        data_mov="04/07/2026",
+        descricao="PAGAMENTO AGUA",
+        importancia="45,20",
+        doc_soma="9999999",
+        tipo=TipoMovimento.SAIDA,
+    )
+    batch_item = SomaSearchResult(
+        codigo="5500222",
+        tipo="SAÍDA",
+        descricao="PAGAMENTO AGUA N001",
+        valor="45,20",
+        data="04/07/2026",
+    )
+    used_codes = set()
+    outcome = service.audit_row_cascade(row, date_batch_items=[batch_item], used_soma_codes=used_codes)
+    assert outcome.confirmed is True
+    assert outcome.corrected is True
+    assert outcome.level_resolved == 2
+    assert outcome.auditoria == "Corrigido"
+    assert outcome.new_doc == "5500222"
+    assert "5500222" in used_codes
+
+
+def test_audit_row_cascade_level_3_semantic():
+    service = AuditService(settings=None, http=None, sheets=None)
+    row = ContaOrdemRow(
+        row_number=13,
+        data_mov="04/07/2026",
+        descricao="SUPERMERCADO CONTINENTE N001",
+        importancia="100,00",
+        doc_soma="1234567",
+        tipo=TipoMovimento.SAIDA,
+    )
+    item_a = SomaSearchResult(
+        codigo="5500333",
+        tipo="SAÍDA",
+        descricao="PADARIA DO BAIRRO",
+        valor="100,00",
+        data="04/07/2026",
+    )
+    item_b = SomaSearchResult(
+        codigo="5500444",
+        tipo="SAÍDA",
+        descricao="SUPERMERCADO CONTINENTE N002",
+        valor="100,00",
+        data="04/07/2026",
+    )
+    used_codes = set()
+    outcome = service.audit_row_cascade(row, date_batch_items=[item_a, item_b], used_soma_codes=used_codes)
+    assert outcome.confirmed is True
+    assert outcome.corrected is True
+    assert outcome.level_resolved == 3
+    assert outcome.new_doc == "5500444"
+    assert "5500444" in used_codes
+
+
+def test_audit_row_cascade_level_4_origin_missing():
+    service = AuditService(settings=None, http=None, sheets=None)
+    row = ContaOrdemRow(
+        row_number=14,
+        data_mov="04/07/2026",
+        descricao="DESPESA SEM SOMA",
+        importancia="30,00",
+        doc_soma="",
+        tipo=TipoMovimento.SAIDA,
+    )
+    outcome = service.audit_row_cascade(row, date_batch_items=[], origin_doc="")
+    assert outcome.confirmed is False
+    assert outcome.level_resolved == 4
+    assert outcome.auditoria == "Pendente lançamento SOMA"
+
