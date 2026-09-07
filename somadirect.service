@@ -1,0 +1,19 @@
+[Unit]
+Description=SOMA Direct - Motor de Lancamento e Conciliacao SOMA
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=opc
+Group=opc
+WorkingDirectory=/home/opc/SOMA_Direct
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/opc/SOMA_Direct/.venv/bin/python /home/opc/SOMA_Direct/agendador.py
+Restart=always
+RestartSec=15
+TimeoutStopSec=60
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target
