@@ -281,3 +281,57 @@ def test_audit_row_ignores_non_entrada_saida():
     assert outcome.confirmed is True
 
 
+def test_audit_row_three_phase_sequence(monkeypatch):
+    service = AuditService(settings=None, http=None, sheets=None)
+    row = ContaOrdemRow(
+        row_number=50,
+        data_mov="06/09/2026",
+        descricao="TRF.CRED DANIEL LUZ",
+        importancia="120,00",
+        doc_soma="5061929",
+        tipo=TipoMovimento.ENTRADA,
+        descricao_soma="DÍZIMOS E OFERTAS (TRANSFERENCIA BANCARIA) N001",
+        forma_pagamento="TRANSFERÊNCIA BANCÁRIA",
+        caixa="CAIXA MONTEPIO",
+    )
+
+    calls = []
+
+    def mock_search_desc(desc, data_mov=""):
+        calls.append(("fase1_desc", desc, data_mov))
+        # Fase 1 retorna candidato compatível
+        return [
+            SomaSearchResult(
+                codigo="5500999",
+                tipo="ENTRADA",
+                descricao="DÍZIMOS E OFERTAS (TRANSFERENCIA BANCARIA) N001",
+                valor="120,00",
+                data="06/09/2026",
+                status="PAGO",
+                baixa="SIM",
+            )
+        ]
+
+    def mock_search_periodo(data_mov):
+        calls.append(("fase2_periodo", data_mov))
+        return []
+
+    def mock_search_codigo(doc_id):
+        calls.append(("fase3_codigo", doc_id))
+        return None
+
+    monkeypatch.setattr(service, "search_by_descricao", mock_search_desc)
+    monkeypatch.setattr(service, "search_by_periodo", mock_search_periodo)
+    monkeypatch.setattr(service, "search_by_codigo", mock_search_codigo)
+    monkeypatch.setattr(service, "fetch_dados_doc", lambda doc: "Registrado(a) em: 06/09/2026, CAIXA MONTEPIO, TRANSFERÊNCIA BANCÁRIA")
+
+    outcome = service.audit_row(row)
+    # Deve encontrar na Fase 1 e NÃO chamar Fase 2 nem Fase 3!
+    assert outcome.corrected is True
+    assert outcome.new_doc == "5500999"
+    assert any(c[0] == "fase1_desc" for c in calls)
+    assert not any(c[0] == "fase2_periodo" for c in calls)
+    assert not any(c[0] == "fase3_codigo" for c in calls)
+
+
+

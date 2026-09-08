@@ -105,7 +105,12 @@ class AuditService:
             payload["v"] = "1"
 
         resp = self.http.post_ajax(f"{self.base_url}sys/post/buscarEntradasSaidas.php", data=payload)
-        return self._parse_search_table(resp.text)
+        items = self._parse_search_table(resp.text)
+        if not items and data_mov:
+            payload["t_d"] = "0"
+            resp0 = self.http.post_ajax(f"{self.base_url}sys/post/buscarEntradasSaidas.php", data=payload)
+            items = self._parse_search_table(resp0.text)
+        return items
 
     def search_by_periodo(self, data_mov: str) -> List[SomaSearchResult]:
         d_norm = normalize_date_str(data_mov)
@@ -126,7 +131,17 @@ class AuditService:
             "f": d_norm,
         }
         resp = self.http.post_ajax(f"{self.base_url}sys/post/buscarEntradasSaidas.php", data=payload)
-        return self._parse_search_table(resp.text)
+        items = self._parse_search_table(resp.text)
+        payload["t_d"] = "0"
+        resp0 = self.http.post_ajax(f"{self.base_url}sys/post/buscarEntradasSaidas.php", data=payload)
+        items0 = self._parse_search_table(resp0.text)
+        seen = set()
+        unified = []
+        for it in items + items0:
+            if it.codigo not in seen:
+                seen.add(it.codigo)
+                unified.append(it)
+        return unified
 
     def fetch_dados_doc(self, doc_id: str) -> str:
         doc_clean = normalize_document_value(doc_id)
@@ -405,89 +420,163 @@ class AuditService:
 
 
     def audit_row(self, row: ContaOrdemRow) -> AuditOutcome:
-        """Audita uma única linha seguindo a cascata de 3 etapas com validação de DADOS DOC."""
+        """Audita uma única linha seguindo a sequência estrita:
+        1. FASE 1: Pesquisa por Descrição + Data (Modo C - início da pesquisa)
+        2. FASE 2: Pesquisa por Lote de Data (Modo B - se Fase 1 não encontrar)
+        3. FASE 3: Pesquisa por DOC. SOMA (Modo A - última fase)
+        
+        Avança para o próximo registo assim que encontrar/corrigir,
+        só passando à fase seguinte no mesmo registo se a anterior falhar.
+        """
         if not is_entrada_ou_saida(row.tipo):
             logger.info("Linha %s ignorada: TIPO '%s' não é Entrada ou Saída", row.row_number, row.tipo.value if row.tipo else "")
             return AuditOutcome(analyzed=False, confirmed=True)
 
         doc_soma = normalize_document_value(row.doc_soma)
+        target_val = clean_amount_for_comparison(row.importancia)
+        target_desc = norm_basic(row.descricao_soma or row.descricao)
+        inconsistencias: List[str] = []
 
-        # ETAPA 1: Pesquisa por Código Documento
-        if doc_soma:
+        # =========================================================================
+        # FASE 1: Pesquisa por Descrição + Data (Modo C - Início da Pesquisa)
+        # =========================================================================
+        desc_search_term = row.descricao_soma or row.descricao
+        if desc_search_term:
+            terms_to_try = [desc_search_term]
+            stripped = strip_suffix_n(desc_search_term)
+            if stripped != desc_search_term:
+                terms_to_try.append(stripped)
+
+            for term in terms_to_try:
+                desc_candidates = self.search_by_descricao(term, data_mov=row.data_mov)
+                if desc_candidates:
+                    for cand in desc_candidates:
+                        if "EM ABERTO" in (cand.status or "").upper():
+                            cand_val = clean_amount_for_comparison(cand.valor)
+                            if cand_val == target_val and norm_basic(cand.tipo) == norm_basic(row.tipo.value):
+                                logger.info(
+                                    "Linha %s: Lançamento DOC %s em aberto no SOMA. Inserindo pagamento com data %s...",
+                                    row.row_number, cand.codigo, row.data_mov,
+                                )
+                                self.insert_soma_payment(
+                                    doc_id=cand.codigo,
+                                    data_pagamento=row.data_mov,
+                                    valor=row.importancia,
+                                    caixa_str=row.caixa,
+                                    forma_str=row.forma_pagamento,
+                                )
+                                refreshed = self.search_by_codigo(cand.codigo)
+                                if refreshed:
+                                    cand = refreshed
+
+                        cand_audit, _ = self.validate_soma_record(row, cand)
+                        if cand_audit == "Confirmado":
+                            is_corr = bool(doc_soma and doc_soma != normalize_document_value(cand.codigo))
+                            return self._process_dados_doc_and_finalize(
+                                row=row,
+                                matched_doc=normalize_document_value(cand.codigo),
+                                is_correction=is_corr,
+                            )
+                        matched, desc_differs = self.matches_ignoring_code_and_suffix(row, cand)
+                        if matched:
+                            return self._process_dados_doc_and_finalize(
+                                row=row,
+                                matched_doc=normalize_document_value(cand.codigo),
+                                new_desc=cand.descricao if desc_differs else None,
+                                is_correction=True,
+                            )
+
+        # =========================================================================
+        # FASE 2: Pesquisa por Lote de Data (Modo B - se Fase 1 não encontrou)
+        # =========================================================================
+        if row.data_mov:
+            periodo_candidates = self.search_by_periodo(row.data_mov)
+            if periodo_candidates:
+                # 1. Match de valor, tipo e descrição exata
+                for cand in periodo_candidates:
+                    if "EM ABERTO" in (cand.status or "").upper():
+                        cand_val = clean_amount_for_comparison(cand.valor)
+                        if cand_val == target_val and norm_basic(cand.tipo) == norm_basic(row.tipo.value):
+                            self.insert_soma_payment(
+                                doc_id=cand.codigo,
+                                data_pagamento=row.data_mov,
+                                valor=row.importancia,
+                                caixa_str=row.caixa,
+                                forma_str=row.forma_pagamento,
+                            )
+                            refreshed = self.search_by_codigo(cand.codigo)
+                            if refreshed:
+                                cand = refreshed
+
+                    cand_audit, _ = self.validate_soma_record(row, cand)
+                    if cand_audit == "Confirmado":
+                        is_corr = bool(doc_soma and doc_soma != normalize_document_value(cand.codigo))
+                        return self._process_dados_doc_and_finalize(
+                            row=row,
+                            matched_doc=normalize_document_value(cand.codigo),
+                            is_correction=is_corr,
+                        )
+                    matched, desc_differs = self.matches_ignoring_code_and_suffix(row, cand)
+                    if matched and norm_basic(cand.descricao) == target_desc:
+                        return self._process_dados_doc_and_finalize(
+                            row=row,
+                            matched_doc=normalize_document_value(cand.codigo),
+                            new_desc=cand.descricao if desc_differs else None,
+                            is_correction=True,
+                        )
+
+                # 2. Match semântico ignorando sufixo Nxxx no lote de data
+                for cand in periodo_candidates:
+                    matched, desc_differs = self.matches_ignoring_code_and_suffix(row, cand)
+                    if matched:
+                        return self._process_dados_doc_and_finalize(
+                            row=row,
+                            matched_doc=normalize_document_value(cand.codigo),
+                            new_desc=cand.descricao if desc_differs else None,
+                            is_correction=True,
+                        )
+
+        # =========================================================================
+        # FASE 3: Pesquisa por DOC. SOMA (Modo A - última fase)
+        # =========================================================================
+        if doc_soma and doc_soma.isdigit():
             search_result = self.search_by_codigo(doc_soma)
-            if search_result and "EM ABERTO" in (search_result.status or "").upper():
-                logger.info(
-                    "Linha %s: Lançamento DOC %s em aberto no SOMA. Inserindo pagamento com data %s...",
-                    row.row_number,
-                    doc_soma,
-                    row.data_mov,
-                )
-                self.insert_soma_payment(
-                    doc_id=doc_soma,
-                    data_pagamento=row.data_mov,
-                    valor=row.importancia,
-                    caixa_str=row.caixa,
-                    forma_str=row.forma_pagamento,
-                )
-                search_result = self.search_by_codigo(doc_soma)
+            if search_result is not None:
+                if "EM ABERTO" in (search_result.status or "").upper():
+                    logger.info(
+                        "Linha %s: Lançamento DOC %s em aberto no SOMA. Inserindo pagamento com data %s...",
+                        row.row_number, doc_soma, row.data_mov,
+                    )
+                    self.insert_soma_payment(
+                        doc_id=doc_soma,
+                        data_pagamento=row.data_mov,
+                        valor=row.importancia,
+                        caixa_str=row.caixa,
+                        forma_str=row.forma_pagamento,
+                    )
+                    search_result = self.search_by_codigo(doc_soma)
 
-            auditoria, inconsistencias = self.validate_soma_record(row, search_result)
-            if auditoria == "Confirmado" and search_result is not None:
-                return self._process_dados_doc_and_finalize(
-                    row=row,
-                    matched_doc=normalize_document_value(search_result.codigo),
-                )
+                auditoria, inconsistencias = self.validate_soma_record(row, search_result)
+                if auditoria == "Confirmado":
+                    return self._process_dados_doc_and_finalize(
+                        row=row,
+                        matched_doc=normalize_document_value(search_result.codigo),
+                    )
+            else:
+                inconsistencias = [f"Código {doc_soma} não existe no SOMA"]
         else:
-            inconsistencias = ["DOC. SOMA não preenchido"]
+            if not doc_soma:
+                inconsistencias = ["DOC. SOMA não preenchido e não localizado por descrição nem lote de data"]
+            else:
+                inconsistencias = [f"DOC não numérico ('{doc_soma}')"]
 
-        # ETAPA 2: Fallback por Descrição + Período
-        desc_candidates = self.search_by_descricao(row.descricao_soma or row.descricao, data_mov=row.data_mov)
-        if desc_candidates:
-            for cand in desc_candidates:
-                cand_audit, _ = self.validate_soma_record(row, cand)
-                if cand_audit == "Confirmado":
-                    return self._process_dados_doc_and_finalize(
-                        row=row,
-                        matched_doc=normalize_document_value(cand.codigo),
-                    )
-                matched, desc_differs = self.matches_ignoring_code_and_suffix(row, cand)
-                if matched:
-                    return self._process_dados_doc_and_finalize(
-                        row=row,
-                        matched_doc=normalize_document_value(cand.codigo),
-                        new_desc=cand.descricao if desc_differs else None,
-                        is_correction=True,
-                    )
-
-        # ETAPA 3: Fallback por Período (sem texto no filtro de busca)
-        periodo_candidates = self.search_by_periodo(row.data_mov)
-        if periodo_candidates:
-            # Prioriza match exato de descrição completa
-            target_desc = norm_basic(row.descricao_soma or row.descricao)
-            for cand in periodo_candidates:
-                matched, desc_differs = self.matches_ignoring_code_and_suffix(row, cand)
-                if matched and norm_basic(cand.descricao) == target_desc:
-                    return self._process_dados_doc_and_finalize(
-                        row=row,
-                        matched_doc=normalize_document_value(cand.codigo),
-                        new_desc=cand.descricao if desc_differs else None,
-                        is_correction=True,
-                    )
-            # Match ignorando sufixo Nxxx
-            for cand in periodo_candidates:
-                matched, desc_differs = self.matches_ignoring_code_and_suffix(row, cand)
-                if matched:
-                    return self._process_dados_doc_and_finalize(
-                        row=row,
-                        matched_doc=normalize_document_value(cand.codigo),
-                        new_desc=cand.descricao if desc_differs else None,
-                        is_correction=True,
-                    )
-
+        # =========================================================================
+        # Se falhar as 3 fases: registra inconsistência e avança para o próximo registo
+        # =========================================================================
         return AuditOutcome(
             analyzed=True,
             inconsistent=True,
-            inconsistencies=inconsistencias or ["Registo não localizado no portal SOMA"],
+            inconsistencies=inconsistencias or ["Registo não localizado no portal SOMA nas 3 fases de pesquisa"],
         )
 
     def audit_all(
