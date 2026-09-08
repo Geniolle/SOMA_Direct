@@ -185,7 +185,7 @@ class GoogleSheetsService:
         if not updates_list:
             return
         headers = self.get_headers()
-        header_map = {h.strip(): i + 1 for i, h in enumerate(headers)}
+        norm_map = {norm_basic(h): i + 1 for i, h in enumerate(headers)}
         data_to_batch = []
         for upd in updates_list:
             row_idx = upd["row_idx"]
@@ -206,8 +206,9 @@ class GoogleSheetsService:
                 cells.append(("STATUS", upd["status"]))
 
             for col_name, val in cells:
-                if col_name in header_map:
-                    c_idx = header_map[col_name]
+                col_norm = norm_basic(col_name)
+                if col_norm in norm_map:
+                    c_idx = norm_map[col_norm]
                     a1 = f"{self._col_letter(c_idx)}{row_idx}"
                     data_to_batch.append({"range": a1, "values": [[val]]})
 
@@ -236,14 +237,14 @@ class GoogleSheetsService:
         5. Retorna estatísticas e lista de linhas ajustadas.
         """
         headers = self.get_headers()
-        header_map = {h.strip(): i for i, h in enumerate(headers)}
+        norm_map = {norm_basic(h): i for i, h in enumerate(headers)}
 
-        dt_idx = header_map.get("DATA MOV.", 0)
-        tipo_idx = header_map.get("TIPO", 6)
-        doc_idx = header_map.get("DOC. SOMA", 4)
-        desc_idx = header_map.get("DESCRIÇÃO", 2)
-        desc_soma_idx = header_map.get("DESCRIÇÃO SOMA", 9)
-        val_idx = header_map.get("IMPORTÂNCIA", 3)
+        dt_idx = norm_map.get(norm_basic("DATA MOV."), 0)
+        tipo_idx = norm_map.get(norm_basic("TIPO"), 6)
+        doc_idx = norm_map.get(norm_basic("DOC. SOMA"), 4)
+        desc_idx = norm_map.get(norm_basic("DESCRIÇÃO"), 2)
+        desc_soma_idx = norm_map.get(norm_basic("DESCRIÇÃO SOMA"), 9)
+        val_idx = norm_map.get(norm_basic("IMPORTÂNCIA"), 3)
 
         all_vals = []
         for attempt in range(5):
