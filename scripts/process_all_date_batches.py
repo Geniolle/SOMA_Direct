@@ -11,7 +11,13 @@ from config.settings import Settings
 from core.http_session import ResilientSession
 from core.auth import SomaAuthenticator
 from services.audit_service import AuditService, SomaSearchResult
-from domain.models import clean_amount_for_comparison, is_entrada_ou_saida
+from domain.models import (
+    clean_amount_for_comparison,
+    is_entrada_ou_saida,
+    norm_basic,
+    normalize_date_str,
+    strip_suffix_n,
+)
 import gspread
 
 def safe_call(func, *args, **kwargs):
@@ -139,7 +145,7 @@ def main():
             return
         safe_call(co_ws.batch_update, pending_updates)
         pending_updates.clear()
-        time.sleep(0.8) # Respeita cota de escrita
+        time.sleep(1.0) # Respeita cota de escrita
         
     for batch_idx, dt in enumerate(sorted_dates, 1):
         batch_rows = rows_by_date[dt]
@@ -158,31 +164,58 @@ def main():
             new_aud = current_aud
             new_doc = current_doc
             
-            # Regra 1: Transferências Internas
+            # Regra 1: Transferências Internas / MVV / Cartão
             if tipo.lower() == "transferência" or current_doc.lower() == "transferido":
+                new_aud = "Confirmado"
+                total_confirmados += 1
+            elif current_doc.upper() == "MVV" or "mvv" in norm_basic(tipo):
+                new_aud = "Confirmado"
+                total_confirmados += 1
+            elif current_doc.upper() in ("PAGTO CARTÃO", "PAGTO CARTAO") or "cartao" in norm_basic(tipo):
                 new_aud = "Confirmado"
                 total_confirmados += 1
                 
             # Regra 2: Linha possui DOC numérico
             elif current_doc.isdigit():
-                if current_doc in soma_codes_on_date:
-                    soma_item = soma_codes_on_date[current_doc]
+                soma_item = soma_codes_on_date.get(current_doc) or soma_by_code.get(current_doc)
+                if soma_item is not None:
                     used_soma_codes.add(current_doc)
-                    if clean_amount_for_comparison(soma_item.valor) == clean_val:
-                        new_aud = "Confirmado"
-                        total_confirmados += 1
-                    else:
+                    site_val = clean_amount_for_comparison(soma_item.valor)
+                    site_dt = normalize_date_str(soma_item.data)
+                    sheet_dt = normalize_date_str(dt)
+                    site_tipo = norm_basic(soma_item.tipo)
+                    sheet_tipo = norm_basic(tipo)
+                    site_status = norm_basic(soma_item.status)
+                    site_baixa = norm_basic(soma_item.baixa)
+
+                    site_desc = norm_basic(soma_item.descricao)
+                    desc_to_check = r[desc_soma_idx].strip() or r[desc_idx].strip()
+                    sheet_desc = norm_basic(desc_to_check)
+
+                    if site_status != "pago" or site_baixa != "sim":
+                        new_aud = f"Não quitado no SOMA (Status={soma_item.status} / Baixa={soma_item.baixa})"
+                        total_divergentes += 1
+                    elif site_val != clean_val:
                         new_aud = f"Valor divergente: site={soma_item.valor} != sheet={val}"
                         total_divergentes += 1
-                elif current_doc in soma_by_code:
-                    soma_item = soma_by_code[current_doc]
-                    used_soma_codes.add(current_doc)
-                    if clean_amount_for_comparison(soma_item.valor) == clean_val:
+                    elif site_dt != sheet_dt:
+                        new_aud = f"Data divergente: site={soma_item.data} != sheet={dt}"
+                        total_divergentes += 1
+                    elif site_tipo != sheet_tipo:
+                        new_aud = f"Tipo divergente: site={soma_item.tipo} != sheet={tipo}"
+                        total_divergentes += 1
+                    elif site_desc != sheet_desc:
+                        base_site = norm_basic(strip_suffix_n(soma_item.descricao))
+                        base_sheet = norm_basic(strip_suffix_n(desc_to_check))
+                        if base_site == base_sheet:
+                            new_aud = "Confirmado"
+                            total_confirmados += 1
+                        else:
+                            new_aud = f"Descrição divergente: site='{soma_item.descricao[:30]}'"
+                            total_divergentes += 1
+                    else:
                         new_aud = "Confirmado"
                         total_confirmados += 1
-                    else:
-                        new_aud = f"Valor divergente: site={soma_item.valor} != sheet={val}"
-                        total_divergentes += 1
                 else:
                     # DOC não encontrado no SOMA. Verifica se há movimento sem vínculo nessa data
                     available_matches = [
@@ -220,6 +253,9 @@ def main():
                 else:
                     new_aud = "Pendente lançamento SOMA"
                     total_pendentes += 1
+            else:
+                new_aud = f"DOC não numérico ('{current_doc}')"
+                total_divergentes += 1
                     
             # Se o AUDITORIA mudou, agenda atualização
             if new_aud != current_aud:
@@ -228,8 +264,8 @@ def main():
                     "values": [[new_aud]]
                 })
                 
-        # Atualiza a cada 50 linhas ou no término do lote
-        if len(pending_updates) >= 50 or batch_idx == len(sorted_dates):
+        # Atualiza a cada 200 linhas ou no término do lote
+        if len(pending_updates) >= 200 or batch_idx == len(sorted_dates):
             flush_updates()
             
         if batch_idx % 100 == 0 or batch_idx == len(sorted_dates):
