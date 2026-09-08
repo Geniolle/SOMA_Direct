@@ -102,33 +102,29 @@ class SomaApiService:
         return "1"
 
     def _find_doc_id(self, tipo: str, descricao: str, valor: str, data_mov: str) -> Optional[str]:
-        """Consulta buscarEntradasSaidas.php e retorna o CODIGO do documento correspondente."""
+        """Consulta buscarEntradasSaidas.php e retorna o CODIGO do documento estritamente correspondente."""
         search_payload = {
             "pesquisa": descricao,
             "filtro": "descricao",
             "id_inst": self.settings.institution_id,
             "tipo": tipo,
-            "v": "0",
-            "i": "",
-            "f": "",
+            "v": "1" if data_mov else "0",
+            "i": data_mov or "",
+            "f": data_mov or "",
             "s": "2",
             "t_d": "1",
             "cc": "-1",
-            "c": ""
+            "c": "",
         }
         resp = self.http.post_ajax(f"{self.base_url}sys/post/buscarEntradasSaidas.php", data=search_payload)
         clean_val = clean_amount(valor)
         for rw in re.findall(r'<tr\b[^>]*>(.*?)</tr>', resp.text, re.DOTALL):
             cells = [re.sub(r'<[^>]+>', ' ', c).strip() for c in re.findall(r'<t[dh]\b[^>]*>(.*?)</t[dh]>', rw, re.DOTALL)]
-            # Procura o código numérico na linha
             for c in cells:
                 if c.isdigit() and len(c) >= 5:
                     row_text = " ".join(cells)
-                    if clean_val in row_text or data_mov in row_text:
+                    if clean_val in row_text and (not data_mov or data_mov in row_text):
                         return c
-        m = re.search(r'<td>\s*(\d{6,8})\s*</td>', resp.text)
-        if m:
-            return m.group(1)
         return None
 
     def _find_transfer_id(self, valor: str, data_mov: str) -> Optional[str]:
