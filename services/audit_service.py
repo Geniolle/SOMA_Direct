@@ -515,6 +515,13 @@ class AuditService:
                             row_seq = extract_suffix_n(row.descricao_soma or row.descricao)
                             cand_seq = extract_suffix_n(cand.descricao)
                             if row_seq is not None and cand_seq is not None and row_seq != cand_seq:
+                                if doc_soma and cand_code == doc_soma:
+                                    return self._process_dados_doc_and_finalize(
+                                        row=row,
+                                        matched_doc=cand_code,
+                                        new_desc=cand.descricao if desc_differs else None,
+                                        is_correction=True,
+                                    )
                                 continue
                             return self._process_dados_doc_and_finalize(
                                 row=row,
@@ -566,7 +573,8 @@ class AuditService:
                             is_correction=True,
                         )
 
-                # 2. Match semântico ignorando sufixo Nxxx no lote de data
+                # 2. Match semântico no lote de data (avaliando lote por valor, tipo e descrição base)
+                semantic_candidates = []
                 for cand in periodo_candidates:
                     cand_code = normalize_document_value(cand.codigo)
                     if cand_code in self.used_docs_in_run and cand_code != doc_soma:
@@ -574,10 +582,36 @@ class AuditService:
 
                     matched, desc_differs = self.matches_ignoring_code_and_suffix(row, cand)
                     if matched:
-                        row_seq = extract_suffix_n(row.descricao_soma or row.descricao)
+                        semantic_candidates.append((cand, desc_differs))
+
+                if semantic_candidates:
+                    row_seq = extract_suffix_n(row.descricao_soma or row.descricao)
+
+                    # Prioridade A: DOC. SOMA coincide com um dos candidatos
+                    if doc_soma:
+                        for cand, desc_differs in semantic_candidates:
+                            if normalize_document_value(cand.codigo) == doc_soma:
+                                return self._process_dados_doc_and_finalize(
+                                    row=row,
+                                    matched_doc=doc_soma,
+                                    new_desc=cand.descricao if desc_differs else None,
+                                    is_correction=True,
+                                )
+
+                    # Prioridade B: Sequencial Nxxx coincide exatamente
+                    for cand, desc_differs in semantic_candidates:
                         cand_seq = extract_suffix_n(cand.descricao)
-                        if row_seq is not None and cand_seq is not None and row_seq != cand_seq:
-                            continue
+                        if row_seq is not None and cand_seq is not None and row_seq == cand_seq:
+                            return self._process_dados_doc_and_finalize(
+                                row=row,
+                                matched_doc=normalize_document_value(cand.codigo),
+                                new_desc=cand.descricao if desc_differs else None,
+                                is_correction=True,
+                            )
+
+                    # Prioridade C: Candidato único no lote de data com mesmo valor e descrição base
+                    if len(semantic_candidates) == 1:
+                        cand, desc_differs = semantic_candidates[0]
                         return self._process_dados_doc_and_finalize(
                             row=row,
                             matched_doc=normalize_document_value(cand.codigo),
@@ -610,6 +644,25 @@ class AuditService:
                     return self._process_dados_doc_and_finalize(
                         row=row,
                         matched_doc=normalize_document_value(search_result.codigo),
+                    )
+
+                # Se falhou por divergência no sequencial/descrição na folha,
+                # mas o DOC existe e Tipo, Valor, Data, Status PAGO e Baixa SIM batem 100%:
+                matched, desc_differs = self.matches_ignoring_code_and_suffix(row, search_result)
+                if matched and desc_differs:
+                    logger.info(
+                        "Linha %s: DOC %s bate Tipo, Valor e Data, mas sequencial difere ('%s' vs '%s'). "
+                        "Atualizando descrição na folha conforme SOMA.",
+                        row.row_number,
+                        doc_soma,
+                        row.descricao_soma or row.descricao,
+                        search_result.descricao,
+                    )
+                    return self._process_dados_doc_and_finalize(
+                        row=row,
+                        matched_doc=normalize_document_value(search_result.codigo),
+                        new_desc=search_result.descricao,
+                        is_correction=True,
                     )
             else:
                 inconsistencias = [f"Código {doc_soma} não existe no SOMA"]

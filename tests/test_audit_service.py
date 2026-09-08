@@ -334,4 +334,51 @@ def test_audit_row_three_phase_sequence(monkeypatch):
     assert not any(c[0] == "fase3_codigo" for c in calls)
 
 
+def test_audit_row_corrects_divergent_sequential_in_sheet(monkeypatch):
+    """
+    Testa o caso específico onde o DOC. SOMA está preenchido na folha (ex: 4580356),
+    a folha tem sequencial N007, mas no SOMA o mesmo DOC tem sequencial N008.
+    Todos os dados financeiros (Data, Valor, Tipo, Status=PAGO, Baixa=SIM, Caixa, Forma) batem 100%.
+    O auditor deve retornar is_correction=True, new_doc=4580356 e new_desc com N008!
+    """
+    service = AuditService(settings=None, http=None, sheets=None)
+    row = ContaOrdemRow(
+        row_number=2,
+        data_mov="06/09/2025",
+        descricao="DÍZIMOS E OFERTAS (TRANSFERENCIA BANCARIA) N007",
+        importancia="25,00",
+        doc_soma="4580356",
+        tipo=TipoMovimento.ENTRADA,
+        descricao_soma="DÍZIMOS E OFERTAS (TRANSFERENCIA BANCARIA) N007",
+        forma_pagamento="TRANSFERÊNCIA BANCÁRIA",
+        caixa="MONTEPIO GERAL",
+    )
+
+    soma_doc_4580356 = SomaSearchResult(
+        codigo="4580356",
+        tipo="ENTRADA",
+        descricao="DÍZIMOS E OFERTAS (TRANSFERENCIA BANCARIA) N008",
+        valor="25,00",
+        data="06/09/2025",
+        status="PAGO",
+        baixa="SIM",
+    )
+
+    monkeypatch.setattr(service, "search_by_descricao", lambda *args, **kwargs: [])
+    monkeypatch.setattr(service, "search_by_periodo", lambda *args, **kwargs: [soma_doc_4580356])
+    monkeypatch.setattr(service, "search_by_codigo", lambda doc_id: soma_doc_4580356 if doc_id == "4580356" else None)
+    monkeypatch.setattr(
+        service,
+        "fetch_dados_doc",
+        lambda doc: "Registrado(a) em: 06/09/2025 às 10:00:00, MONTEPIO GERAL, TRANSFERÊNCIA BANCÁRIA . Baixa realizada por USERJOB",
+    )
+
+    outcome = service.audit_row(row)
+    assert outcome.corrected is True
+    assert outcome.new_doc == "4580356"
+    assert outcome.new_desc == "DÍZIMOS E OFERTAS (TRANSFERENCIA BANCARIA) N008"
+    assert outcome.inconsistent is False
+
+
+
 

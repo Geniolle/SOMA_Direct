@@ -190,19 +190,19 @@ class GoogleSheetsService:
         for upd in updates_list:
             row_idx = upd["row_idx"]
             cells = []
-            if "auditoria" in upd:
+            if upd.get("auditoria") is not None:
                 cells.append(("AUDITORIA", upd["auditoria"]))
-            if "new_doc" in upd:
+            if upd.get("new_doc") is not None:
                 cells.append(("DOC. SOMA", upd["new_doc"]))
-            if "new_desc" in upd:
+            if upd.get("new_desc") is not None:
                 cells.append(("DESCRIÇÃO SOMA", upd["new_desc"]))
-            if "new_tipo" in upd:
+            if upd.get("new_tipo") is not None:
                 cells.append(("TIPO", upd["new_tipo"]))
-            if "new_data" in upd:
+            if upd.get("new_data") is not None:
                 cells.append(("DATA MOV.", upd["new_data"]))
-            if "dados_doc" in upd:
+            if upd.get("dados_doc") is not None:
                 cells.append(("DADOS DOC", upd["dados_doc"]))
-            if "status" in upd:
+            if upd.get("status") is not None:
                 cells.append(("STATUS", upd["status"]))
 
             for col_name, val in cells:

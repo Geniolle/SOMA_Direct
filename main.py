@@ -89,7 +89,14 @@ def main():
             print(f"RESULTADOS DA AUDITORIA (Tempo Total: {total_time:.2f}s):")
             for idx, o in zip(args.rows, outcomes):
                 status_txt = "CONFIRMADO" if o.confirmed else ("CORRIGIDO" if o.corrected else "INCONSISTENTE")
-                extra = f" -> Novo DOC={o.new_doc}" if o.corrected else ""
+                extra = ""
+                if o.corrected:
+                    parts = []
+                    if o.new_doc:
+                        parts.append(f"Novo DOC={o.new_doc}")
+                    if o.new_desc:
+                        parts.append(f"Novo DESC={o.new_desc}")
+                    extra = f" -> {', '.join(parts)}"
                 print(f"  Linha {idx:4d}: Resultado={status_txt:14s}{extra}")
             print("=" * 75)
         else:
