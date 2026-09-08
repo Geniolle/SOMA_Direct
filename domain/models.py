@@ -101,6 +101,17 @@ def strip_suffix_n(text: Any) -> str:
     return re.sub(r"\s+N\d+$", "", str(text or "").strip(), flags=re.IGNORECASE).strip()
 
 
+def extract_suffix_n(text: Any) -> Optional[int]:
+    """Extrai o número sequencial de ' N001', ' N002', etc., ou None se ausente."""
+    m = re.search(r"\bN(\d+)\b", str(text or ""), flags=re.IGNORECASE)
+    return int(m.group(1)) if m else None
+
+
+def strip_date_prefix(text: Any) -> str:
+    """Remove prefixos de data como '30/11/2025-' ou '01/01/2024 - '."""
+    return re.sub(r"^\d{2}/\d{2}/\d{4}\s*[-–]\s*", "", str(text or "")).strip()
+
+
 def clean_caixa(caixa: Any) -> str:
     """Remove sufixos entre colchetes como [CONTA CORRENTE] e normaliza."""
     c = re.sub(r"\[.*?\]", "", str(caixa or "").strip()).strip()
@@ -135,7 +146,11 @@ def validate_dados_doc(
 
     if norm_sheet_f and norm_site_f:
         if norm_sheet_f not in norm_site_f:
-            return False, f"FORMA DE PAGAMENTO divergente no DADOS DOC: portal='{site_forma_resto}' != sheet='{sheet_forma}'"
+            transfer_synonyms = {"transferencia bancaria", "transferencia", "deposito"}
+            if norm_sheet_f in transfer_synonyms and any(s in norm_site_f for s in transfer_synonyms):
+                pass
+            else:
+                return False, f"FORMA DE PAGAMENTO divergente no DADOS DOC: portal='{site_forma_resto}' != sheet='{sheet_forma}'"
 
     return True, None
 

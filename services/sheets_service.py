@@ -1,12 +1,23 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
+from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
+
 import gspread
 from gspread.utils import ValueRenderOption
+
 from config.settings import Settings
-from domain.models import ContaOrdemRow, TipoMovimento, is_entrada_ou_saida
+from domain.models import (
+    ContaOrdemRow,
+    TipoMovimento,
+    is_entrada_ou_saida,
+    norm_basic,
+    strip_date_prefix,
+    strip_suffix_n,
+)
 
 logger = logging.getLogger("soma_direct.sheets")
 
@@ -178,18 +189,20 @@ class GoogleSheetsService:
         data_to_batch = []
         for upd in updates_list:
             row_idx = upd["row_idx"]
-            cells = [("AUDITORIA", upd["auditoria"])]
-            if upd.get("new_doc"):
+            cells = []
+            if "auditoria" in upd:
+                cells.append(("AUDITORIA", upd["auditoria"]))
+            if "new_doc" in upd:
                 cells.append(("DOC. SOMA", upd["new_doc"]))
-            if upd.get("new_desc"):
+            if "new_desc" in upd:
                 cells.append(("DESCRIÇÃO SOMA", upd["new_desc"]))
-            if upd.get("new_tipo"):
+            if "new_tipo" in upd:
                 cells.append(("TIPO", upd["new_tipo"]))
-            if upd.get("new_data"):
+            if "new_data" in upd:
                 cells.append(("DATA MOV.", upd["new_data"]))
-            if upd.get("dados_doc"):
+            if "dados_doc" in upd:
                 cells.append(("DADOS DOC", upd["dados_doc"]))
-            if upd.get("status"):
+            if "status" in upd:
                 cells.append(("STATUS", upd["status"]))
 
             for col_name, val in cells:
@@ -199,13 +212,136 @@ class GoogleSheetsService:
                     data_to_batch.append({"range": a1, "values": [[val]]})
 
         if data_to_batch:
-            for attempt in range(5):
-                try:
-                    self._ws.batch_update(data_to_batch)
-                    break
-                except Exception as e:
-                    if "429" in str(e) and attempt < 4:
-                        time.sleep(20)
-                    else:
-                        raise
+            chunk_size = 500
+            for i in range(0, len(data_to_batch), chunk_size):
+                chunk = data_to_batch[i : i + chunk_size]
+                for attempt in range(5):
+                    try:
+                        self._ws.batch_update(chunk)
+                        break
+                    except Exception as e:
+                        if "429" in str(e) and attempt < 4:
+                            time.sleep(20)
+                        else:
+                            raise
+
+    def harmonize_sequentials_and_duplicates(self, update_sheet: bool = True) -> Dict[str, Any]:
+        """Pré-validação e harmonização de sequenciais Nxxx e DOC. SOMA duplicados na planilha CONTAORDEM:
+        1. Lê todas as linhas da planilha.
+        2. Agrupa lançamentos por lote de data (DATA MOV.), tipo (Entrada/Saída) e descrição base (sem data e sem Nxxx).
+        3. Para lotes com sequenciais duplicados, fora de ordem ou DOCs SOMA duplicados:
+           - Re-sequencia a DESCRIÇÃO SOMA na ordem das linhas: f"{base} N{i:03d}" para i=1..len(items).
+           - Limpa o DOC. SOMA, AUDITORIA e STATUS nas linhas subsequentes onde o DOC numérico foi duplicado.
+        4. Se update_sheet=True, grava as alterações na planilha Google Sheets via batch_update.
+        5. Retorna estatísticas e lista de linhas ajustadas.
+        """
+        headers = self.get_headers()
+        header_map = {h.strip(): i for i, h in enumerate(headers)}
+
+        dt_idx = header_map.get("DATA MOV.", 0)
+        tipo_idx = header_map.get("TIPO", 6)
+        doc_idx = header_map.get("DOC. SOMA", 4)
+        desc_idx = header_map.get("DESCRIÇÃO", 2)
+        desc_soma_idx = header_map.get("DESCRIÇÃO SOMA", 9)
+        val_idx = header_map.get("IMPORTÂNCIA", 3)
+
+        all_vals = []
+        for attempt in range(5):
+            try:
+                all_vals = self._ws.get_all_values()
+                break
+            except Exception as e:
+                if "429" in str(e) and attempt < 4:
+                    logger.warning("Cota excedida ao ler planilha. Aguardando 20s...")
+                    time.sleep(20)
+                else:
+                    raise
+
+        data_rows = all_vals[1:]
+        groups = defaultdict(list)
+        for r_idx, r in enumerate(data_rows, start=2):
+            while len(r) < len(headers):
+                r.append("")
+            t = r[tipo_idx].strip()
+            dt = r[dt_idx].strip()
+            if not dt or not is_entrada_ou_saida(t):
+                continue
+            fdesc = r[desc_soma_idx].strip() or r[desc_idx].strip()
+            base = strip_date_prefix(strip_suffix_n(fdesc)).strip()
+            groups[(dt, norm_basic(t), base.upper())].append((r_idx, r, base))
+
+        updates_list = []
+        batches_affected = set()
+        total_desc_adjusted = 0
+        total_docs_cleared = 0
+        adjustments_summary = []
+
+        for (dt, tipo, base_upper), items in groups.items():
+            if len(items) <= 1:
+                continue
+
+            seqs = [r[desc_soma_idx].strip() for _, r, _ in items]
+            docs = [r[doc_idx].strip() for _, r, _ in items]
+            has_dupe_seq = len(set(seqs)) < len(seqs)
+            has_dupe_doc = len([d for d in docs if d.isdigit()]) > len(set([d for d in docs if d.isdigit()]))
+            has_missing_seq = any(not re.search(r"\bN\d{3}\b", s) for s in seqs)
+
+            if has_dupe_seq or has_dupe_doc or has_missing_seq:
+                batches_affected.add(dt)
+                base_clean = items[0][2]
+                seen_docs = set()
+
+                for i, (r_idx, r, _) in enumerate(items, start=1):
+                    expected_desc = f"{base_clean} N{i:03d}"
+                    cur_desc = r[desc_soma_idx].strip()
+                    cur_doc = r[doc_idx].strip()
+
+                    row_upd = {"row_idx": r_idx}
+                    changed = False
+
+                    if cur_desc != expected_desc:
+                        row_upd["new_desc"] = expected_desc
+                        total_desc_adjusted += 1
+                        changed = True
+
+                    if cur_doc.isdigit():
+                        if cur_doc in seen_docs:
+                            # DOC duplicado neste grupo! Limpa DOC. SOMA, STATUS, AUDITORIA e DADOS DOC
+                            row_upd["new_doc"] = ""
+                            row_upd["status"] = ""
+                            row_upd["auditoria"] = ""
+                            row_upd["dados_doc"] = ""
+                            total_docs_cleared += 1
+                            changed = True
+                            adjustments_summary.append({
+                                "row": r_idx,
+                                "data": dt,
+                                "valor": r[val_idx],
+                                "desc_antiga": cur_desc,
+                                "desc_nova": expected_desc,
+                                "doc_limpo": cur_doc,
+                            })
+                        else:
+                            seen_docs.add(cur_doc)
+
+                    if changed:
+                        updates_list.append(row_upd)
+
+        logger.info(
+            f"Harmonização pré-validação: {len(batches_affected)} lotes de data afetados, "
+            f"{total_desc_adjusted} descrições ajustadas, {total_docs_cleared} DOCs duplicados limpos."
+        )
+
+        if update_sheet and updates_list:
+            self.batch_update_audit_records(updates_list)
+            logger.info("Planilha CONTAORDEM atualizada com sucesso após harmonização.")
+
+        return {
+            "batches_affected": len(batches_affected),
+            "total_desc_adjusted": total_desc_adjusted,
+            "total_docs_cleared": total_docs_cleared,
+            "updates_count": len(updates_list),
+            "adjustments_summary": adjustments_summary,
+        }
+
 

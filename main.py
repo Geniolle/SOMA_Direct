@@ -43,6 +43,7 @@ def main():
     parser.add_argument("--audit", action="store_true", help="Atalho para --mode audit")
     parser.add_argument("--pending", action="store_true", help="Processa todas as linhas pendentes da planilha CONTAORDEM")
     parser.add_argument("--revalidate-inconsistent", action="store_true", help="Revalida linhas com status Inconsistente e grava o motivo detalhado do erro")
+    parser.add_argument("--harmonize-sequentials", "--pre-validate", action="store_true", dest="harmonize_sequentials", help="Pré-validação e harmonização de sequenciais Nxxx e remoção de DOCs duplicados na folha")
     parser.add_argument("--limit", type=int, default=0, help="Limite de linhas a processar/auditar")
     parser.add_argument("--dry-run", action="store_true", help="Executa no modo de simulação (sem gravar no SOMA nem na planilha)")
 
@@ -55,6 +56,22 @@ def main():
 
     orchestrator = DirectOrchestrator()
     t0 = time.perf_counter()
+
+    if args.harmonize_sequentials:
+        print(f"Modo: HARMONIZAÇÃO DE SEQUENCIAIS E PRÉ-VALIDAÇÃO (DryRun={args.dry_run})\n")
+        res = orchestrator.harmonize_sequentials_and_duplicates(dry_run=args.dry_run)
+        print("\n" + "=" * 75)
+        print("RELATÓRIO DE HARMONIZAÇÃO DE SEQUENCIAIS:")
+        print(f"  Lotes de data afetados: {res['batches_affected']}")
+        print(f"  Descrições SOMA com sequencial Nxxx ajustado: {res['total_desc_adjusted']}")
+        print(f"  DOC. SOMA duplicados limpos para re-validação: {res['total_docs_cleared']}")
+        print(f"  Total de atualizações na planilha: {res['updates_count']}")
+        if res.get("adjustments_summary"):
+            print("\nAmostra de correções realizadas (DOCs limpos e descrições ajustadas):")
+            for adj in res["adjustments_summary"][:15]:
+                print(f"  Linha {adj['row']:4d} | Data {adj['data']:10s} | Val {adj['valor']:7s} | DOC limpo: {adj['doc_limpo']:7s} | {adj['desc_antiga']} -> {adj['desc_nova']}")
+        print("=" * 75)
+        return
 
     if args.revalidate_inconsistent:
         print(f"Modo: REVALIDAÇÃO DETALHADA DE INCONSISTÊNCIAS (DryRun={args.dry_run})\n")

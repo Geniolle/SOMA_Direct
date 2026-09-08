@@ -182,5 +182,9 @@ class DirectOrchestrator:
         self.auth.login()
         return self.audit_service.revalidate_inconsistencies(batch_size=batch_size, update_sheet=not dry_run)
 
+    def harmonize_sequentials_and_duplicates(self, dry_run: bool = False):
+        """Pré-validação e harmonização de sequenciais Nxxx e remoção de DOCs SOMA duplicados na folha."""
+        return self.sheets.harmonize_sequentials_and_duplicates(update_sheet=not dry_run)
+
 
 

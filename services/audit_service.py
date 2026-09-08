@@ -19,6 +19,7 @@ from domain.models import (
     normalize_date_str,
     normalize_document_value,
     strip_suffix_n,
+    extract_suffix_n,
     validate_dados_doc,
 )
 from services.sheets_service import GoogleSheetsService
@@ -34,6 +35,7 @@ class AuditService:
         self.http = http
         self.sheets = sheets
         self.base_url = (settings.site_base_url.rstrip("/") + "/") if settings else ""
+        self.used_docs_in_run: set[str] = set()
 
     def _parse_search_table(self, html: str) -> List[SomaSearchResult]:
         results: List[SomaSearchResult] = []
@@ -390,6 +392,10 @@ class AuditService:
         new_desc: Optional[str] = None,
         is_correction: bool = False,
     ) -> AuditOutcome:
+        doc_clean = normalize_document_value(matched_doc)
+        if doc_clean:
+            self.used_docs_in_run.add(doc_clean)
+
         sheet_dados = str(row.dados_doc or "").strip()
         dados_doc_site = ""
 
@@ -474,6 +480,10 @@ class AuditService:
                 desc_candidates = self.search_by_descricao(term, data_mov=row.data_mov)
                 if desc_candidates:
                     for cand in desc_candidates:
+                        cand_code = normalize_document_value(cand.codigo)
+                        if cand_code in self.used_docs_in_run and cand_code != doc_soma:
+                            continue
+
                         if "EM ABERTO" in (cand.status or "").upper():
                             cand_val = clean_amount_for_comparison(cand.valor)
                             if cand_val == target_val and norm_basic(cand.tipo) == norm_basic(row.tipo.value):
@@ -502,6 +512,10 @@ class AuditService:
                             )
                         matched, desc_differs = self.matches_ignoring_code_and_suffix(row, cand)
                         if matched:
+                            row_seq = extract_suffix_n(row.descricao_soma or row.descricao)
+                            cand_seq = extract_suffix_n(cand.descricao)
+                            if row_seq is not None and cand_seq is not None and row_seq != cand_seq:
+                                continue
                             return self._process_dados_doc_and_finalize(
                                 row=row,
                                 matched_doc=normalize_document_value(cand.codigo),
@@ -517,6 +531,10 @@ class AuditService:
             if periodo_candidates:
                 # 1. Match de valor, tipo e descrição exata
                 for cand in periodo_candidates:
+                    cand_code = normalize_document_value(cand.codigo)
+                    if cand_code in self.used_docs_in_run and cand_code != doc_soma:
+                        continue
+
                     if "EM ABERTO" in (cand.status or "").upper():
                         cand_val = clean_amount_for_comparison(cand.valor)
                         if cand_val == target_val and norm_basic(cand.tipo) == norm_basic(row.tipo.value):
@@ -550,8 +568,16 @@ class AuditService:
 
                 # 2. Match semântico ignorando sufixo Nxxx no lote de data
                 for cand in periodo_candidates:
+                    cand_code = normalize_document_value(cand.codigo)
+                    if cand_code in self.used_docs_in_run and cand_code != doc_soma:
+                        continue
+
                     matched, desc_differs = self.matches_ignoring_code_and_suffix(row, cand)
                     if matched:
+                        row_seq = extract_suffix_n(row.descricao_soma or row.descricao)
+                        cand_seq = extract_suffix_n(cand.descricao)
+                        if row_seq is not None and cand_seq is not None and row_seq != cand_seq:
+                            continue
                         return self._process_dados_doc_and_finalize(
                             row=row,
                             matched_doc=normalize_document_value(cand.codigo),
