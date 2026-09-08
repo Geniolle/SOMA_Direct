@@ -246,15 +246,38 @@ class AuditService:
             ok = False
             try:
                 res_json = resp.json()
-                if res_json.get("status") in (1, 4) or res_json.get("pago") == 1:
+                if res_json.get("status") in (1, 4) or res_json.get("pago") == 1 or res_json.get("status") == 8:
                     ok = True
-                    logger.info(f"Pagamento para DOC {doc_clean} registrado com sucesso no SOMA ({res_json}).")
+                    logger.info(f"Pagamento para DOC {doc_clean} registrado/verificado no SOMA ({res_json}).")
             except Exception:
                 if resp.status_code == 200 and ('"status":1' in resp.text or '"pago":1' in resp.text):
                     ok = True
 
             if not ok:
                 logger.warning(f"Resposta ao registrar pagamento do DOC {doc_clean}: {resp.text[:150]}")
+
+            # 2. Realizar a baixa do pagamento (sys/app/baixas.php)
+            time.sleep(0.3)
+            r_get2 = self.http.get(url_get)
+            baixas = re.findall(r'class="[^"]*inst_baixa[^"]*"[^>]*id="(\d+)"', r_get2.text)
+            if not baixas:
+                baixas = re.findall(r'id="(\d+)"[^>]*class="[^"]*inst_baixa', r_get2.text)
+
+            for id_baixa in baixas:
+                payload_baixa = {
+                    "id_pagamento_baixa": id_baixa,
+                    "data_baixa": d_norm,
+                    "add": "1",
+                    "aceitar_caixa_negativo": "1",
+                    "num_doc_baixa": "",
+                }
+                r_baixa = self.http.post(f"{self.base_url}sys/app/baixas.php", data=payload_baixa)
+                try:
+                    res_b = r_baixa.json()
+                    if res_b.get("status") in (1, 4):
+                        logger.info(f"Baixa para ID {id_baixa} (DOC {doc_clean}) realizada com sucesso ({res_b}).")
+                except Exception:
+                    pass
 
             # Voltar e revalidar no SOMA
             time.sleep(0.5)
