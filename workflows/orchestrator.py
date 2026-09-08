@@ -6,7 +6,7 @@ from typing import List, Optional
 from config.settings import Settings
 from core.auth import SomaAuthenticator
 from core.http_session import ResilientSession
-from domain.models import AuditOutcome, ContaOrdemRow, OperationOutcome, TipoMovimento
+from domain.models import AuditOutcome, ContaOrdemRow, OperationOutcome, TipoMovimento, is_entrada_ou_saida
 from services.audit_service import AuditService
 from services.duplicate_checker import DuplicateChecker
 from services.sheets_service import GoogleSheetsService
@@ -102,6 +102,9 @@ class DirectOrchestrator:
             if not row:
                 logger.error(f"Linha {idx} não encontrada na planilha!")
                 continue
+            if not is_entrada_ou_saida(row.tipo):
+                logger.warning(f"Linha {idx} ignorada: TIPO '{row.tipo.value}' não é Entrada ou Saída.")
+                continue
             outcomes.append(self.process_row(row, dry_run=dry_run))
 
         total_ms = int((time.perf_counter() - overall_t0) * 1000)
@@ -112,7 +115,7 @@ class DirectOrchestrator:
         """Varre a planilha CONTAORDEM e processa todos os registros pendentes."""
         self.initialize()
         logger.info("Buscando registros pendentes na planilha...")
-        all_rows = self.sheets.get_all_rows()
+        all_rows = self.sheets.get_all_rows(only_entrada_saida=True)
 
         pending = []
         for r in all_rows:
@@ -144,6 +147,9 @@ class DirectOrchestrator:
             row = self.sheets.get_row(idx)
             if not row:
                 logger.error(f"Linha {idx} não encontrada na planilha!")
+                continue
+            if not is_entrada_ou_saida(row.tipo):
+                logger.warning(f"Linha {idx} ignorada: TIPO '{row.tipo.value}' não é Entrada ou Saída.")
                 continue
             logger.info(f"Auditando Linha {idx}: DOC={row.doc_soma} [{row.tipo.value}]...")
             outcome = self.audit_service.audit_row(row)

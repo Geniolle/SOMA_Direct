@@ -12,6 +12,17 @@ class TipoMovimento(str, Enum):
     ENTRADA = "Entrada"
     SAIDA = "Saída"
     TRANSFERENCIA = "Transferência"
+    CARTAO = "Cartão"
+    MVV = "MVV"
+    OUTRO = "Outro"
+
+
+def is_entrada_ou_saida(val: Any) -> bool:
+    """Retorna True apenas se o tipo for estritamente Entrada ou Saída."""
+    if isinstance(val, TipoMovimento):
+        return val in (TipoMovimento.ENTRADA, TipoMovimento.SAIDA)
+    norm = norm_basic(val)
+    return norm in ("entrada", "ent", "in", "saida", "saída", "out")
 
 
 def normalize_str(s: Any) -> str:
@@ -154,12 +165,19 @@ class ContaOrdemRow:
     @classmethod
     def from_dict(cls, row_number: int, raw: Dict[str, Any]) -> "ContaOrdemRow":
         raw_tipo = normalize_str(raw.get("TIPO") or raw.get("tipo") or "")
-        if "saida" in raw_tipo.lower():
+        norm_t = norm_basic(raw_tipo)
+        if norm_t in ("saida", "saída", "out"):
             tipo = TipoMovimento.SAIDA
-        elif "transfer" in raw_tipo.lower():
-            tipo = TipoMovimento.TRANSFERENCIA
-        else:
+        elif norm_t in ("entrada", "ent", "in"):
             tipo = TipoMovimento.ENTRADA
+        elif "transfer" in norm_t:
+            tipo = TipoMovimento.TRANSFERENCIA
+        elif "cartao" in norm_t:
+            tipo = TipoMovimento.CARTAO
+        elif "mvv" in norm_t:
+            tipo = TipoMovimento.MVV
+        else:
+            tipo = TipoMovimento.OUTRO
 
         return cls(
             row_number=row_number,

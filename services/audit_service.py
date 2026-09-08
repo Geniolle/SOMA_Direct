@@ -14,6 +14,7 @@ from domain.models import (
     SomaSearchResult,
     TipoMovimento,
     clean_amount_for_comparison,
+    is_entrada_ou_saida,
     norm_basic,
     normalize_date_str,
     normalize_document_value,
@@ -101,6 +102,7 @@ class AuditService:
             d_norm = normalize_date_str(data_mov)
             payload["i"] = d_norm
             payload["f"] = d_norm
+            payload["v"] = "1"
 
         resp = self.http.post_ajax(f"{self.base_url}sys/post/buscarEntradasSaidas.php", data=payload)
         return self._parse_search_table(resp.text)
@@ -115,7 +117,7 @@ class AuditService:
             "filtro": "descricao",
             "id_inst": self.settings.institution_id,
             "tipo": "2",
-            "v": "0",
+            "v": "1",
             "s": "2",
             "t_d": "1",
             "cc": "-1",
@@ -147,6 +149,108 @@ class AuditService:
         except Exception as e:
             logger.warning(f"Falha ao buscar DADOS DOC para {doc_clean}: {e}")
             return ""
+
+    def insert_soma_payment(
+        self,
+        doc_id: str,
+        data_pagamento: str,
+        valor: str,
+        caixa_str: str = "",
+        forma_str: str = "",
+    ) -> bool:
+        """Insere pagamento para um lançamento 'EM ABERTO' no portal SOMA.
+
+        Navega até o registro, preenche a data com a data da sheet CONTAORDEM do registro
+        em execução, clica em salvar (POST para sys/app/pagamentos.php), valida o popup
+        de sucesso (status 1) e volta para revalidar no SOMA.
+        """
+        doc_clean = normalize_document_value(doc_id)
+        if not doc_clean:
+            return False
+
+        try:
+            url_get = f"{self.base_url}?mod=ivv&exec=entradas_saidas_dados&ID={doc_clean}"
+            r_get = self.http.get(url_get)
+            if r_get.status_code != 200:
+                logger.error(f"Erro ao acessar documento {doc_clean}: HTTP {r_get.status_code}")
+                return False
+
+            fluxo_valor_m = re.search(r'name=["\']fluxo_valor["\']\s+value=["\'](.*?)["\']', r_get.text)
+            fluxo_valor = fluxo_valor_m.group(1) if fluxo_valor_m else clean_amount_for_comparison(valor)
+
+            caixas = re.findall(r'<select\b[^>]*name=["\']id_caixa["\'][^>]*>(.*?)</select>', r_get.text, re.DOTALL)
+            caixa_opts = re.findall(r'<option\b[^>]*value=["\'](\d+)["\'][^>]*>(.*?)</option>', caixas[0]) if caixas else []
+
+            id_caixa = ""
+            target_cx = norm_basic(caixa_str)
+            if target_cx:
+                for opt_id, opt_text in caixa_opts:
+                    if target_cx in norm_basic(opt_text) or norm_basic(opt_text) in target_cx:
+                        id_caixa = opt_id
+                        break
+            if not id_caixa and caixa_opts:
+                id_caixa = caixa_opts[0][0]
+            if not id_caixa:
+                id_caixa = "1226"
+
+            target_forma = norm_basic(forma_str)
+            if "transf" in target_forma:
+                forma_val = "3"
+            elif "dep" in target_forma:
+                forma_val = "1"
+            elif "pix" in target_forma:
+                forma_val = "4"
+            elif "cheq" in target_forma:
+                forma_val = "2"
+            elif "cart" in target_forma or "maquin" in target_forma:
+                forma_val = "5"
+            else:
+                forma_val = "0"
+
+            d_norm = normalize_date_str(data_pagamento)
+            id_fluxo = f"{int(doc_clean):010d}"
+
+            payload = {
+                "fluxo_desconto": "0,00",
+                "fluxo_valor": fluxo_valor,
+                "data_pagamento": d_norm,
+                "forma_pagamento": forma_val,
+                "aplicar_desconto": "0",
+                "num_cheque": "",
+                "num_documento": "",
+                "tipo_pagamento": "0",
+                "valor_pagamento": fluxo_valor,
+                "id_caixa": id_caixa,
+                "id_fluxo": id_fluxo,
+                "add": "1",
+                "aceitar_caixa_negativo": "1",
+            }
+
+            url_post = f"{self.base_url}sys/app/pagamentos.php"
+            resp = self.http.post(url_post, data=payload)
+            ok = False
+            try:
+                res_json = resp.json()
+                if res_json.get("status") in (1, 4) or res_json.get("pago") == 1:
+                    ok = True
+                    logger.info(f"Pagamento para DOC {doc_clean} registrado com sucesso no SOMA ({res_json}).")
+            except Exception:
+                if resp.status_code == 200 and ('"status":1' in resp.text or '"pago":1' in resp.text):
+                    ok = True
+
+            if not ok:
+                logger.warning(f"Resposta ao registrar pagamento do DOC {doc_clean}: {resp.text[:150]}")
+
+            # Voltar e revalidar no SOMA
+            time.sleep(0.5)
+            verify = self.search_by_codigo(doc_clean)
+            if verify and (norm_basic(verify.status) == "pago" or norm_basic(verify.baixa) == "sim"):
+                logger.info(f"DOC {doc_clean} agora está com status PAGO e baixa SIM no SOMA.")
+                return True
+            return ok
+        except Exception as e:
+            logger.exception(f"Erro ao inserir pagamento para DOC {doc_clean} no SOMA: {e}")
+            return False
 
     def validate_soma_record(
         self,
@@ -302,11 +406,31 @@ class AuditService:
 
     def audit_row(self, row: ContaOrdemRow) -> AuditOutcome:
         """Audita uma única linha seguindo a cascata de 3 etapas com validação de DADOS DOC."""
+        if not is_entrada_ou_saida(row.tipo):
+            logger.info("Linha %s ignorada: TIPO '%s' não é Entrada ou Saída", row.row_number, row.tipo.value if row.tipo else "")
+            return AuditOutcome(analyzed=False, confirmed=True)
+
         doc_soma = normalize_document_value(row.doc_soma)
 
         # ETAPA 1: Pesquisa por Código Documento
         if doc_soma:
             search_result = self.search_by_codigo(doc_soma)
+            if search_result and "EM ABERTO" in (search_result.status or "").upper():
+                logger.info(
+                    "Linha %s: Lançamento DOC %s em aberto no SOMA. Inserindo pagamento com data %s...",
+                    row.row_number,
+                    doc_soma,
+                    row.data_mov,
+                )
+                self.insert_soma_payment(
+                    doc_id=doc_soma,
+                    data_pagamento=row.data_mov,
+                    valor=row.importancia,
+                    caixa_str=row.caixa,
+                    forma_str=row.forma_pagamento,
+                )
+                search_result = self.search_by_codigo(doc_soma)
+
             auditoria, inconsistencias = self.validate_soma_record(row, search_result)
             if auditoria == "Confirmado" and search_result is not None:
                 return self._process_dados_doc_and_finalize(
@@ -527,8 +651,11 @@ class AuditService:
         t0 = time.perf_counter()
         logger.info("Carregando registros inconsistentes para revalidação detalhada...")
 
-        all_rows = self.sheets.get_all_rows()
-        inconsistent_rows = [r for r in all_rows if r.auditoria.strip() == "Inconsistente"]
+        all_rows = self.sheets.get_all_rows(only_entrada_saida=True)
+        inconsistent_rows = [
+            r for r in all_rows 
+            if r.auditoria.strip() == "Inconsistente" and is_entrada_ou_saida(r.tipo)
+        ]
         total_rows = len(inconsistent_rows)
 
         print(f"\n[REVALIDAÇÃO DE INCONSISTÊNCIAS] Total de linhas: {total_rows}\n", flush=True)

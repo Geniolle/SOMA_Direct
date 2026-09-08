@@ -231,3 +231,53 @@ def test_audit_row_cascade_level_4_origin_missing():
     assert outcome.level_resolved == 4
     assert outcome.auditoria == "Pendente lançamento SOMA"
 
+
+def test_is_entrada_ou_saida():
+    from domain.models import is_entrada_ou_saida, TipoMovimento
+    assert is_entrada_ou_saida("Entrada") is True
+    assert is_entrada_ou_saida("Saída") is True
+    assert is_entrada_ou_saida("saida") is True
+    assert is_entrada_ou_saida(TipoMovimento.ENTRADA) is True
+    assert is_entrada_ou_saida(TipoMovimento.SAIDA) is True
+    assert is_entrada_ou_saida("Transferência") is False
+    assert is_entrada_ou_saida("Cartão") is False
+    assert is_entrada_ou_saida("MVV") is False
+    assert is_entrada_ou_saida(TipoMovimento.MVV) is False
+    assert is_entrada_ou_saida(TipoMovimento.CARTAO) is False
+    assert is_entrada_ou_saida(TipoMovimento.TRANSFERENCIA) is False
+    assert is_entrada_ou_saida("") is False
+
+
+def test_contaordem_from_dict_types():
+    from domain.models import ContaOrdemRow, TipoMovimento
+    row_ent = ContaOrdemRow.from_dict(1, {"TIPO": "Entrada"})
+    assert row_ent.tipo == TipoMovimento.ENTRADA
+
+    row_sai = ContaOrdemRow.from_dict(2, {"TIPO": "Saída"})
+    assert row_sai.tipo == TipoMovimento.SAIDA
+
+    row_mvv = ContaOrdemRow.from_dict(3, {"TIPO": "MVV"})
+    assert row_mvv.tipo == TipoMovimento.MVV
+
+    row_cartao = ContaOrdemRow.from_dict(4, {"TIPO": "Cartão"})
+    assert row_cartao.tipo == TipoMovimento.CARTAO
+
+    row_transf = ContaOrdemRow.from_dict(5, {"TIPO": "Transferência"})
+    assert row_transf.tipo == TipoMovimento.TRANSFERENCIA
+
+
+def test_audit_row_ignores_non_entrada_saida():
+    service = AuditService(settings=None, http=None, sheets=None)
+    row = ContaOrdemRow(
+        row_number=5,
+        data_mov="04/07/2026",
+        descricao="TRANSFERENCIA INTERNA",
+        importancia="100,00",
+        doc_soma="MVV",
+        tipo=TipoMovimento.MVV,
+    )
+    outcome = service.audit_row(row)
+    assert outcome.analyzed is False
+    assert outcome.confirmed is True
+
+

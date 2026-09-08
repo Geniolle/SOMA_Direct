@@ -11,7 +11,7 @@ from config.settings import Settings
 from core.http_session import ResilientSession
 from core.auth import SomaAuthenticator
 from services.audit_service import AuditService, SomaSearchResult
-from domain.models import clean_amount_for_comparison
+from domain.models import clean_amount_for_comparison, is_entrada_ou_saida
 import gspread
 
 def safe_call(func, *args, **kwargs):
@@ -70,6 +70,9 @@ def main():
     for r_idx, r in enumerate(co_vals[1:], start=2):
         dt = r[dt_idx].strip()
         if not dt:
+            continue
+        tipo = r[tipo_idx].strip()
+        if not is_entrada_ou_saida(tipo):
             continue
         try:
             d_obj = datetime.strptime(dt, "%d/%m/%Y")

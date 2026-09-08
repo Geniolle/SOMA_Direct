@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import gspread
 from gspread.utils import ValueRenderOption
 from config.settings import Settings
-from domain.models import ContaOrdemRow, TipoMovimento
+from domain.models import ContaOrdemRow, TipoMovimento, is_entrada_ou_saida
 
 logger = logging.getLogger("soma_direct.sheets")
 
@@ -45,7 +45,11 @@ class GoogleSheetsService:
             res = chr(65 + remainder) + res
         return res
 
-    def get_all_rows(self) -> List[ContaOrdemRow]:
+    def get_all_rows(self, only_entrada_saida: bool = True) -> List[ContaOrdemRow]:
+        """Retorna linhas da planilha CONTAORDEM.
+        
+        Por regra, lê apenas registros com TIPO igual a 'Entrada' ou 'Saída'.
+        """
         for i in range(5):
             try:
                 records = self._ws.get_all_records(
@@ -54,7 +58,10 @@ class GoogleSheetsService:
                 )
                 out = []
                 for idx, r in enumerate(records, start=2):
-                    out.append(ContaOrdemRow.from_dict(row_number=idx, raw=r))
+                    row = ContaOrdemRow.from_dict(row_number=idx, raw=r)
+                    if only_entrada_saida and not is_entrada_ou_saida(row.tipo):
+                        continue
+                    out.append(row)
                 return out
             except Exception as e:
                 if "429" in str(e) and i < 4:
@@ -64,10 +71,10 @@ class GoogleSheetsService:
 
     def get_auditable_rows(self) -> List[ContaOrdemRow]:
         """Retorna linhas pendentes de auditoria (AUDITORIA vazia e TIPO Entrada ou Saída)."""
-        all_rows = self.get_all_rows()
+        all_rows = self.get_all_rows(only_entrada_saida=True)
         return [
             r for r in all_rows
-            if not r.auditoria.strip() and r.tipo in (TipoMovimento.ENTRADA, TipoMovimento.SAIDA)
+            if not r.auditoria.strip() and is_entrada_ou_saida(r.tipo)
         ]
 
     def get_row(self, row_idx: int) -> Optional[ContaOrdemRow]:
@@ -176,6 +183,10 @@ class GoogleSheetsService:
                 cells.append(("DOC. SOMA", upd["new_doc"]))
             if upd.get("new_desc"):
                 cells.append(("DESCRIÇÃO SOMA", upd["new_desc"]))
+            if upd.get("new_tipo"):
+                cells.append(("TIPO", upd["new_tipo"]))
+            if upd.get("new_data"):
+                cells.append(("DATA MOV.", upd["new_data"]))
             if upd.get("dados_doc"):
                 cells.append(("DADOS DOC", upd["dados_doc"]))
             if upd.get("status"):
