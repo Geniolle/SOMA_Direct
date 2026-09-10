@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from config.settings import Settings
@@ -248,6 +249,19 @@ class AuditService:
             ok = False
             try:
                 res_json = resp.json()
+                if res_json.get("status") == 5:
+                    open_period_date = datetime.now().strftime("%d/%m/%Y")
+                    if d_norm != open_period_date:
+                        logger.warning(
+                            "Mês de %s fechado para pagamento do DOC %s; tentando compensação em %s.",
+                            d_norm,
+                            doc_clean,
+                            open_period_date,
+                        )
+                        d_norm = open_period_date
+                        payload["data_pagamento"] = d_norm
+                        resp = self.http.post(url_post, data=payload)
+                        res_json = resp.json()
                 if res_json.get("status") in (1, 4) or res_json.get("pago") == 1 or res_json.get("status") == 8:
                     ok = True
                     logger.info(f"Pagamento para DOC {doc_clean} registrado/verificado no SOMA ({res_json}).")
