@@ -734,11 +734,11 @@ class AuditService:
                 elif outcome.corrected:
                     stats["corrected"] += 1
                     status_str = None
-                    aud_str = "Corrigido"
+                    aud_str = "Confirmado"
                 else:
                     stats["inconsistent"] += 1
                     status_str = "ERRO" if "DADOS DOC" in "; ".join(outcome.inconsistencies) else None
-                    aud_str = "Inconsistente"
+                    aud_str = "; ".join(outcome.inconsistencies) or "Registo não confirmado no SOMA"
 
                 updates_buffer.append({
                     "row_idx": row.row_number,
@@ -755,6 +755,11 @@ class AuditService:
             except Exception as e:
                 stats["errors"] += 1
                 logger.exception(f"Erro na auditoria da linha {row.row_number}: {e}")
+                updates_buffer.append({
+                    "row_idx": row.row_number,
+                    "auditoria": f"Erro técnico: {type(e).__name__}: {e}"[:450],
+                    "status": "ERRO",
+                })
 
             # Batch update a cada batch_size linhas
             if update_sheet and len(updates_buffer) >= batch_size:
@@ -888,7 +893,7 @@ class AuditService:
                     status_str = None
                 elif outcome.corrected:
                     stats["corrected_now"] += 1
-                    aud_text = "Corrigido"
+                    aud_text = "Confirmado"
                     new_doc = outcome.new_doc
                     new_desc = outcome.new_desc
                     status_str = None
@@ -914,6 +919,11 @@ class AuditService:
             except Exception as e:
                 stats["errors"] += 1
                 logger.exception(f"Erro na revalidação da linha {row.row_number}: {e}")
+                updates_buffer.append({
+                    "row_idx": row.row_number,
+                    "auditoria": f"Erro técnico: {type(e).__name__}: {e}"[:450],
+                    "status": "ERRO",
+                })
 
             if update_sheet and len(updates_buffer) >= batch_size:
                 self.sheets.batch_update_audit_records(updates_buffer)
@@ -1032,7 +1042,7 @@ class AuditService:
                 confirmed=True,
                 corrected=is_corrigido,
                 level_resolved=2,
-                auditoria="Corrigido" if is_corrigido else "Confirmado",
+                auditoria="Confirmado",
                 new_doc=matched.codigo,
                 new_desc=matched.descricao,
                 notes="DOC alocado 1-para-1 por Lote de Data",
@@ -1059,7 +1069,7 @@ class AuditService:
                 confirmed=True,
                 corrected=is_corrigido,
                 level_resolved=3,
-                auditoria="Corrigido" if is_corrigido else "Confirmado",
+                auditoria="Confirmado",
                 new_doc=best_cand.codigo,
                 new_desc=best_cand.descricao,
                 notes="DOC alocado por proximidade semântica no lote",

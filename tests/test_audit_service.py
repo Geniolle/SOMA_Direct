@@ -178,7 +178,7 @@ def test_audit_row_cascade_level_2_date_batch():
     assert outcome.confirmed is True
     assert outcome.corrected is True
     assert outcome.level_resolved == 2
-    assert outcome.auditoria == "Corrigido"
+    assert outcome.auditoria == "Confirmado"
     assert outcome.new_doc == "5500222"
     assert "5500222" in used_codes
 

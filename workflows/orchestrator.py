@@ -293,7 +293,11 @@ class DirectOrchestrator:
             outcomes.append(outcome)
 
             status_str = "ERRO" if outcome.inconsistent and "DADOS DOC" in "; ".join(outcome.inconsistencies) else None
-            aud_str = "Confirmado" if outcome.confirmed else ("Corrigido" if outcome.corrected else "Inconsistente")
+            aud_str = (
+                "Confirmado"
+                if outcome.confirmed or outcome.corrected
+                else "; ".join(outcome.inconsistencies) or "Registo não confirmado no SOMA"
+            )
 
             updates.append({
                 "row_idx": idx,
@@ -378,7 +382,7 @@ class DirectOrchestrator:
                     "new_doc": doc,
                     "new_desc": item.descricao,
                     "status": "VALIDADO",
-                    "auditoria": "Descrição/DOC reconciliados automaticamente",
+                    "auditoria": "Confirmado",
                     "dados_doc": dados or row.dados_doc,
                 })
                 doc_users[doc].add(row.row_number)
@@ -388,7 +392,7 @@ class DirectOrchestrator:
                     "row_idx": row.row_number,
                     "new_doc": "Analisar",
                     "status": "Duplicidade",
-                    "auditoria": f"Duplicidade pendente: {len(valid)} candidato(s) inequívoco(s)",
+                    "auditoria": f"Duplicidade: {len(valid)} candidato(s) inequívoco(s)",
                 })
                 unresolved += 1
 

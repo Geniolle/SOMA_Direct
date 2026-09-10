@@ -115,6 +115,7 @@ class GoogleSheetsService:
         cells_to_update = [
             ("DOC. SOMA", doc_id),
             ("STATUS", "VALIDADO"),
+            ("AUDITORIA", "Confirmado"),
             ("IDUSER", self.settings.user_job_id),
             ("TIMESTAMP", now_str),
         ]
@@ -158,7 +159,11 @@ class GoogleSheetsService:
         headers = self.get_headers()
         header_map = {norm_basic(h): i + 1 for i, h in enumerate(headers)}
         updates = []
-        for name, value in (("STATUS", "EM ERRO"), ("DADOS DOC", str(message)[:450])):
+        for name, value in (
+            ("STATUS", "EM ERRO"),
+            ("AUDITORIA", str(message)[:450]),
+            ("DADOS DOC", str(message)[:450]),
+        ):
             col = header_map.get(norm_basic(name))
             if col:
                 updates.append({"range": f"{self._col_letter(col)}{row_idx}", "values": [[value]]})
@@ -173,6 +178,7 @@ class GoogleSheetsService:
         for name, value in (
             ("DOC. SOMA", "Analisar"),
             ("STATUS", "ERRO"),
+            ("AUDITORIA", str(message)[:450]),
             ("DADOS DOC", str(message)[:450]),
         ):
             col = header_map.get(norm_basic(name))
@@ -189,6 +195,7 @@ class GoogleSheetsService:
         for name, value in (
             ("DOC. SOMA", "Analisar"),
             ("STATUS", "Duplicidade"),
+            ("AUDITORIA", f"Duplicidade: pesquisa encontrou {count} registros no SOMA"),
             ("DADOS DOC", f"Pesquisa preventiva encontrou {count} registros no SOMA"),
         ):
             col = header_map.get(norm_basic(name))

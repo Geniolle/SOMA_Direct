@@ -187,7 +187,7 @@ class ReconciliationResolver:
                 d_doc = self.audit.fetch_dados_doc(doc) if doc else ""
                 sheet_updates.append({
                     "row_idx": row_num,
-                    "auditoria": "Corrigido",
+                    "auditoria": "Confirmado",
                     "status": "VALIDADO",
                     "dados_doc": d_doc,
                 })
@@ -235,7 +235,7 @@ class ReconciliationResolver:
                         sheet_updates.append({
                             "row_idx": row_num,
                             "new_tipo": expected_tipo,
-                            "auditoria": "Corrigido",
+                            "auditoria": "Confirmado",
                             "status": "VALIDADO",
                             "dados_doc": self.audit.fetch_dados_doc(doc) if doc else "",
                         })
@@ -266,7 +266,7 @@ class ReconciliationResolver:
                         "row_idx": row_num,
                         "new_doc": unused_candidate.codigo,
                         "new_desc": unused_candidate.descricao,
-                        "auditoria": "Corrigido",
+                        "auditoria": "Confirmado",
                         "status": "VALIDADO",
                         "dados_doc": self.audit.fetch_dados_doc(unused_candidate.codigo),
                     })
@@ -298,7 +298,7 @@ class ReconciliationResolver:
                     sheet_updates.append({
                         "row_idx": row_num,
                         "new_desc": soma_desc,
-                        "auditoria": "Corrigido",
+                        "auditoria": "Confirmado",
                         "status": "VALIDADO",
                         "dados_doc": self.audit.fetch_dados_doc(doc),
                     })
@@ -318,7 +318,7 @@ class ReconciliationResolver:
                     sheet_updates.append({
                         "row_idx": row_num,
                         "new_desc": soma_desc,
-                        "auditoria": "Corrigido",
+                        "auditoria": "Confirmado",
                         "status": "VALIDADO",
                         "dados_doc": self.audit.fetch_dados_doc(doc),
                     })
@@ -326,7 +326,7 @@ class ReconciliationResolver:
                     soma_updates.append({"doc": doc, "new_desc": full_desc})
                     sheet_updates.append({
                         "row_idx": row_num,
-                        "auditoria": "Corrigido",
+                        "auditoria": "Confirmado",
                         "status": "VALIDADO",
                         "dados_doc": self.audit.fetch_dados_doc(doc),
                     })
@@ -347,7 +347,7 @@ class ReconciliationResolver:
                     sheet_updates.append({
                         "row_idx": row_num,
                         "new_desc": new_desc,
-                        "auditoria": "Corrigido",
+                        "auditoria": "Confirmado",
                         "status": "VALIDADO",
                         "dados_doc": self.audit.fetch_dados_doc(doc),
                     })
