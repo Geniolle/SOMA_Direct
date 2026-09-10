@@ -21,10 +21,14 @@ from workflows.orchestrator import DirectOrchestrator
 
 
 def parse_date(value: str) -> datetime:
+    date_text = value.strip()
+    date_format = "%d%m%Y" if date_text.isdigit() and len(date_text) == 8 else "%d/%m/%Y"
     try:
-        return datetime.strptime(value.strip(), "%d/%m/%Y")
+        return datetime.strptime(date_text, date_format)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError("use o formato DD/MM/AAAA") from exc
+        raise argparse.ArgumentTypeError(
+            "use o formato DD/MM/AAAA ou DDMMAAAA"
+        ) from exc
 
 
 def resolve_interval(start: str = "", end: str = ""):
@@ -82,6 +86,62 @@ def load_soma_interval(orchestrator, start_date, end_date):
     return results
 
 
+def print_final_result(
+    start_date,
+    end_date,
+    apply_changes,
+    stats,
+    sheet_rows_count,
+    soma_items_count,
+    reverse_errors,
+):
+    direct_divergences = stats["divergentes"]
+    reverse_divergences = (
+        stats["inversa_duplicada"]
+        + stats["inversa_sem_doc"]
+        + stats["inversa_ambigua"]
+        + stats["inversa_ausente"]
+    )
+    total_divergences = direct_divergences + reverse_divergences
+    status = (
+        "CONCLUÍDO SEM DIVERGÊNCIAS"
+        if total_divergences == 0
+        else f"ATENÇÃO: {total_divergences} DIVERGÊNCIA(S) ENCONTRADA(S)"
+    )
+
+    print("\n" + "=" * 60)
+    print("RESULTADO FINAL DA RONDA")
+    print("=" * 60)
+    print(f"Status: {status}")
+    print(f"Período analisado: {start_date:%d/%m/%Y} a {end_date:%d/%m/%Y}")
+    print(
+        "Modo de execução: "
+        + ("APLICAÇÃO (alterações gravadas)" if apply_changes else "SIMULAÇÃO (nenhuma alteração gravada)")
+    )
+
+    print("\n1. Validação direta — Sheet → SOMA")
+    print(f"   Linhas analisadas: {sheet_rows_count}")
+    print(f"   Linhas confirmadas: {stats['confirmados']}")
+    print(f"   Linhas corrigidas com segurança: {stats['corrigidos']}")
+    print(f"   Linhas com divergência: {direct_divergences}")
+
+    print("\n2. Validação inversa — SOMA → Sheet")
+    print(f"   Documentos SOMA analisados: {soma_items_count}")
+    print(f"   Documentos vinculados corretamente: {stats['inversa_confirmada']}")
+    print(f"   Documentos duplicados na Sheet: {stats['inversa_duplicada']}")
+    print(f"   Correspondências sem DOC. SOMA: {stats['inversa_sem_doc']}")
+    print(f"   Correspondências ambíguas: {stats['inversa_ambigua']}")
+    print(f"   Documentos ausentes na Sheet: {stats['inversa_ausente']}")
+
+    if reverse_errors:
+        print("\nDetalhes das divergências inversas:")
+        for error in reverse_errors:
+            print(f"   - {error}")
+    else:
+        print("\nNenhuma divergência encontrada nas duas validações.")
+    print("=" * 60)
+
+
 def run_round(start_date, end_date, apply_changes=False):
     orchestrator = DirectOrchestrator(Settings.from_env())
     orchestrator.auth.login()
@@ -109,6 +169,8 @@ def run_round(start_date, end_date, apply_changes=False):
             if outcome.confirmed or outcome.corrected:
                 audit_text = "Confirmado"
                 stats["confirmados"] += 1
+                if outcome.corrected:
+                    stats["corrigidos"] += 1
             else:
                 audit_text = (
                     "; ".join(outcome.inconsistencies)
@@ -186,13 +248,15 @@ def run_round(start_date, end_date, apply_changes=False):
                 f"{item.tipo} | {item.valor} | {item.descricao}"
             )
 
-    print("\nRESULTADO FINAL")
-    print(f"Período: {start_date:%d/%m/%Y} a {end_date:%d/%m/%Y}")
-    print(f"Modo: {'APLICAÇÃO' if apply_changes else 'SIMULAÇÃO'}")
-    print(f"Estatísticas: {dict(stats)}")
-    print(f"Documentos SOMA na análise inversa: {len(soma_items)}")
-    for error in reverse_errors:
-        print(f"DIVERGÊNCIA INVERSA: {error}")
+    print_final_result(
+        start_date=start_date,
+        end_date=end_date,
+        apply_changes=apply_changes,
+        stats=stats,
+        sheet_rows_count=len(rows),
+        soma_items_count=len(soma_items),
+        reverse_errors=reverse_errors,
+    )
     return dict(stats)
 
 
