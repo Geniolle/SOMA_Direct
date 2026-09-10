@@ -8,7 +8,17 @@ from typing import List, Optional
 from config.settings import Settings
 from core.auth import SomaAuthenticator
 from core.http_session import ResilientSession
-from domain.models import AuditOutcome, ContaOrdemRow, OperationOutcome, TipoMovimento, format_amount_for_input, is_entrada_ou_saida
+from domain.models import (
+    AuditOutcome,
+    ContaOrdemRow,
+    OperationOutcome,
+    TipoMovimento,
+    clean_amount_for_comparison,
+    format_amount_for_input,
+    is_entrada_ou_saida,
+    norm_basic,
+    normalize_date_str,
+)
 from services.audit_service import AuditService
 from services.duplicate_checker import DuplicateChecker
 from services.sheets_service import GoogleSheetsService
@@ -115,19 +125,57 @@ class DirectOrchestrator:
         return None
 
     def _process_claimed_row(self, row: ContaOrdemRow) -> OperationOutcome:
+        # 1. Pesquisa preventiva estrita por DATA MOV. + DESCRIÇÃO SOMA.
+        candidates = [
+            item for item in self.audit_service.search_by_descricao(row.descricao_soma, data_mov=row.data_mov)
+            if norm_basic(item.descricao) == norm_basic(row.descricao_soma)
+            and normalize_date_str(item.data) == normalize_date_str(row.data_mov)
+        ]
+        if len(candidates) > 1:
+            self.sheets.mark_row_duplicate(row.row_number, len(candidates))
+            message = f"Pesquisa encontrou {len(candidates)} registros com a mesma data e descrição"
+            logger.error("Linha %s: %s", row.row_number, message)
+            return OperationOutcome(False, "Analisar", row.tipo.value, row.row_number, 0, error_message=message)
 
-        # 1. Pré-checagem de duplicidade no SOMA
-        existing_doc = self.duplicate_checker.check_exists(row)
-        if existing_doc:
-            confirmation_error = self._confirm_and_settle(row, existing_doc)
-            if confirmation_error:
-                self.sheets.mark_row_failed(row.row_number, confirmation_error)
-                return OperationOutcome(False, existing_doc, row.tipo.value, row.row_number, 0, error_message=confirmation_error)
-            logger.info(f"-> Registro já lançado anteriormente no SOMA com DOC {existing_doc}. Atualizando planilha...")
+        if len(candidates) == 1:
+            existing = candidates[0]
+            existing_doc = existing.codigo
+            mismatches = []
+            if clean_amount_for_comparison(existing.valor) != clean_amount_for_comparison(row.importancia):
+                mismatches.append(f"VALOR site='{existing.valor}' != sheet='{row.importancia}'")
+            if norm_basic(existing.tipo) != norm_basic(row.tipo.value):
+                mismatches.append(f"TIPO site='{existing.tipo}' != sheet='{row.tipo.value}'")
+            if mismatches:
+                message = "; ".join(mismatches)
+                self.sheets.mark_row_validation_error(row.row_number, message)
+                return OperationOutcome(False, "Analisar", row.tipo.value, row.row_number, 0, error_message=message)
+
+            paid = norm_basic(existing.status) == "pago" and norm_basic(existing.baixa) == "sim"
+            if not paid and "em aberto" in norm_basic(existing.status):
+                paid = self.audit_service.insert_soma_payment(
+                    doc_id=existing_doc,
+                    data_pagamento=row.data_mov,
+                    valor=row.importancia,
+                    caixa_str=row.caixa,
+                    forma_str=row.forma_pagamento,
+                )
+                existing = self.audit_service.search_by_codigo(existing_doc)
+                paid = bool(
+                    paid and existing
+                    and norm_basic(existing.status) == "pago"
+                    and norm_basic(existing.baixa) == "sim"
+                )
+            if not paid:
+                message = f"Documento {existing_doc} existe, mas não ficou PAGO com baixa SIM"
+                self.sheets.mark_row_validation_error(row.row_number, message)
+                return OperationOutcome(False, "Analisar", row.tipo.value, row.row_number, 0, error_message=message)
+
+            dados_doc = self.audit_service.fetch_dados_doc(existing_doc)
+            logger.info(f"-> Documento existente confirmado no SOMA com DOC {existing_doc}. Atualizando planilha...")
             self.sheets.mark_row_completed(
                 row_idx=row.row_number,
                 doc_id=existing_doc,
-                dados_doc=f"Documento recuperado do SOMA ({existing_doc})",
+                dados_doc=dados_doc or f"Documento recuperado do SOMA ({existing_doc})",
                 elapsed_ms=0
             )
             return OperationOutcome(
@@ -139,7 +187,7 @@ class DirectOrchestrator:
                 dados_doc="Documento existente recuperado"
             )
 
-        # 2. Execução da operação correspondente
+        # 2. Nenhum registro encontrado: criação autorizada.
         if row.tipo == TipoMovimento.SAIDA:
             outcome = self.api.criar_saida(row)
         elif row.tipo == TipoMovimento.ENTRADA:

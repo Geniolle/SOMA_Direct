@@ -181,6 +181,22 @@ class GoogleSheetsService:
         if updates:
             self._ws.batch_update(updates)
 
+    def mark_row_duplicate(self, row_idx: int, count: int) -> None:
+        """Bloqueia criação quando a pesquisa preventiva encontra vários registros."""
+        headers = self.get_headers()
+        header_map = {norm_basic(h): i + 1 for i, h in enumerate(headers)}
+        updates = []
+        for name, value in (
+            ("DOC. SOMA", "Analisar"),
+            ("STATUS", "Duplicidade"),
+            ("DADOS DOC", f"Pesquisa preventiva encontrou {count} registros no SOMA"),
+        ):
+            col = header_map.get(norm_basic(name))
+            if col:
+                updates.append({"range": f"{self._col_letter(col)}{row_idx}", "values": [[value]]})
+        if updates:
+            self._ws.batch_update(updates)
+
     def mark_row_audit(
         self,
         row_idx: int,

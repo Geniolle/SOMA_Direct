@@ -1,4 +1,5 @@
 from domain.models import ContaOrdemRow, TipoMovimento
+from domain.models import SomaSearchResult
 from workflows.orchestrator import DirectOrchestrator
 
 
@@ -87,3 +88,85 @@ def test_validation_error_writes_analisar_and_erro():
         {"range": "B3", "values": [["ERRO"]]},
         {"range": "C3", "values": [["Descrição obrigatória"]]},
     ]
+
+
+def test_duplicate_marker_writes_analisar_and_duplicidade():
+    from services.sheets_service import GoogleSheetsService
+
+    sheets = object.__new__(GoogleSheetsService)
+    sheets._ws = FakeWorksheet()
+    sheets._headers_cache = ["DOC. SOMA", "STATUS", "DADOS DOC"]
+    sheets.mark_row_duplicate(3, 2)
+    assert sheets._ws.updates == [
+        {"range": "A3", "values": [["Analisar"]]},
+        {"range": "B3", "values": [["Duplicidade"]]},
+        {"range": "C3", "values": [["Pesquisa preventiva encontrou 2 registros no SOMA"]]},
+    ]
+
+
+class PreventiveSheets:
+    def __init__(self):
+        self.duplicate = None
+        self.completed = None
+
+    def mark_row_duplicate(self, row, count):
+        self.duplicate = (row, count)
+
+    def mark_row_completed(self, **kwargs):
+        self.completed = kwargs
+
+
+class PreventiveAudit:
+    def __init__(self, candidates):
+        self.candidates = candidates
+        self.payment_calls = 0
+
+    def search_by_descricao(self, descricao, data_mov=""):
+        return self.candidates
+
+    def insert_soma_payment(self, **kwargs):
+        self.payment_calls += 1
+        return True
+
+    def search_by_codigo(self, doc):
+        return SomaSearchResult(doc, "Entrada", "DESCRIÇÃO SOMA N001", "1,00", "10/09/2026", "PAGO", "SIM")
+
+    def fetch_dados_doc(self, doc):
+        return "confirmado"
+
+
+def candidate(code, status="PAGO", baixa="SIM"):
+    return SomaSearchResult(code, "Entrada", "DESCRIÇÃO SOMA N001", "1,00", "10/09/2026", status, baixa)
+
+
+def preventive_orchestrator(candidates):
+    orchestrator = object.__new__(DirectOrchestrator)
+    orchestrator.sheets = PreventiveSheets()
+    orchestrator.audit_service = PreventiveAudit(candidates)
+    return orchestrator
+
+
+def test_multiple_search_results_are_marked_as_duplicate():
+    orchestrator = preventive_orchestrator([candidate("10"), candidate("11")])
+    outcome = orchestrator._process_claimed_row(valid_row())
+    assert outcome.success is False
+    assert outcome.doc_id == "Analisar"
+    assert orchestrator.sheets.duplicate == (2, 2)
+
+
+def test_single_paid_result_is_copied_without_payment():
+    orchestrator = preventive_orchestrator([candidate("10")])
+    outcome = orchestrator._process_claimed_row(valid_row())
+    assert outcome.success is True
+    assert outcome.doc_id == "10"
+    assert orchestrator.audit_service.payment_calls == 0
+    assert orchestrator.sheets.completed["doc_id"] == "10"
+
+
+def test_single_open_result_is_paid_then_copied():
+    orchestrator = preventive_orchestrator([candidate("10", "EM ABERTO", "")])
+    outcome = orchestrator._process_claimed_row(valid_row())
+    assert outcome.success is True
+    assert outcome.doc_id == "10"
+    assert orchestrator.audit_service.payment_calls == 1
+    assert orchestrator.sheets.completed["doc_id"] == "10"
