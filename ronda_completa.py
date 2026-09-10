@@ -1,7 +1,11 @@
 import argparse
 import calendar
+import html
+import logging
+import re
 import sys
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -11,13 +15,45 @@ if str(base_dir) not in sys.path:
 
 from config.settings import Settings
 from domain.models import (
+    TipoMovimento,
     clean_amount_for_comparison,
+    clean_caixa,
     is_entrada_ou_saida,
     norm_basic,
     normalize_date_str,
     normalize_document_value,
 )
 from workflows.orchestrator import DirectOrchestrator
+
+
+@dataclass(frozen=True)
+class SomaTransfer:
+    transfer_id: str
+    caixa_origem: str
+    valor_saida: str
+    caixa_destino: str
+    valor_entrada: str
+    data: str
+    observacao: str = ""
+
+
+def progress_text(current: int, total: int) -> str:
+    return f"Linhas da sheet no período: {current}/{total}"
+
+
+def render_progress(current: int, total: int):
+    print(f"\r{progress_text(current, total)}", end="", flush=True)
+
+
+def clear_progress(total: int):
+    width = len(progress_text(total, total))
+    print(f"\r{' ' * width}\r", end="", flush=True)
+
+
+def print_row_error(row_number: int, message: str, current: int, total: int):
+    clear_progress(total)
+    print(f"Linha {row_number}: {message}", flush=True)
+    render_progress(current, total)
 
 
 def parse_date(value: str) -> datetime:
@@ -47,6 +83,99 @@ def row_date_in_interval(value, start_date, end_date):
     except argparse.ArgumentTypeError:
         return False
     return start_date <= parsed <= end_date
+
+
+def is_round_movement(row) -> bool:
+    return is_entrada_ou_saida(row.tipo) or row.tipo == TipoMovimento.TRANSFERENCIA
+
+
+def normalize_transfer_caixa(value) -> str:
+    caixa = clean_caixa(value)
+    caixa = re.sub(r"\s*-?\s*\b(?:cc|conta corrente)\b\s*$", "", caixa)
+    return caixa.strip(" -")
+
+
+def transfer_key(data, valor, caixa_origem, caixa_destino):
+    return (
+        normalize_date_str(data),
+        clean_amount_for_comparison(valor),
+        normalize_transfer_caixa(caixa_origem),
+        normalize_transfer_caixa(caixa_destino),
+    )
+
+
+def parse_transfer_table(page_text: str):
+    transfers = []
+    for raw_row in re.findall(r"<tr\b[^>]*>(.*?)</tr>", page_text, re.I | re.S):
+        id_match = re.search(
+            r'class=["\'][^"\']*\bbnt_excluir\b[^"\']*["\'][^>]*\bid=["\'](\d+)["\']',
+            raw_row,
+            re.I,
+        )
+        if not id_match:
+            continue
+        cells = []
+        for raw_cell in re.findall(r"<td\b[^>]*>(.*?)</td>", raw_row, re.I | re.S):
+            cell_text = html.unescape(re.sub(r"<[^>]+>", " ", raw_cell))
+            cells.append(" ".join(cell_text.split()))
+        if len(cells) < 5:
+            continue
+        origin, amount_out, destination, amount_in, date = cells[-5:]
+        obs_match = re.search(
+            r'class=["\'][^"\']*\bbtn_obs\b[^"\']*["\'][^>]*\bdata-dados=["\']([^"\']*)["\']',
+            raw_row,
+            re.I,
+        )
+        transfers.append(
+            SomaTransfer(
+                transfer_id=id_match.group(1),
+                caixa_origem=origin,
+                valor_saida=amount_out,
+                caixa_destino=destination,
+                valor_entrada=amount_in,
+                data=date,
+                observacao=html.unescape(obs_match.group(1)) if obs_match else "",
+            )
+        )
+    return transfers
+
+
+def load_soma_transfers_interval(orchestrator, start_date, end_date):
+    url = (
+        f"{orchestrator.settings.site_base_url.rstrip('/')}"
+        "/sys/post/buscarTransferenciasCaixas.php"
+    )
+    response = orchestrator.http.post_ajax(
+        url,
+        data={
+            "id_inst": orchestrator.settings.institution_id,
+            "i": start_date.strftime("%d/%m/%Y"),
+            "f": end_date.strftime("%d/%m/%Y"),
+        },
+    )
+    return parse_transfer_table(response.text)
+
+
+def delete_soma_transfer(orchestrator, transfer_id: str):
+    url = (
+        f"{orchestrator.settings.site_base_url.rstrip('/')}"
+        "/sys/app/transferencias_caixas.php"
+    )
+    response = orchestrator.http.post_ajax(
+        url,
+        data={"id": transfer_id, "excluir": "1"},
+    )
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise RuntimeError(
+            f"resposta inválida ao excluir transferência {transfer_id}"
+        ) from exc
+    if int(payload.get("status", 0)) != 1:
+        raise RuntimeError(
+            f"SOMA recusou a exclusão da transferência {transfer_id} "
+            f"(status={payload.get('status')})"
+        )
 
 
 def load_soma_interval(orchestrator, start_date, end_date):
@@ -102,7 +231,15 @@ def print_final_result(
         + stats["inversa_ambigua"]
         + stats["inversa_ausente"]
     )
-    total_divergences = direct_divergences + reverse_divergences
+    unresolved_transfer_duplicates = max(
+        0,
+        stats["transferencias_duplicadas"] - stats["transferencias_removidas"],
+    )
+    total_divergences = (
+        direct_divergences
+        + reverse_divergences
+        + unresolved_transfer_duplicates
+    )
     status = (
         "CONCLUÍDO SEM DIVERGÊNCIAS"
         if total_divergences == 0
@@ -119,13 +256,23 @@ def print_final_result(
         + ("APLICAÇÃO (alterações gravadas)" if apply_changes else "SIMULAÇÃO (nenhuma alteração gravada)")
     )
 
-    print("\n1. Validação direta — Sheet → SOMA")
+    print("\n1. Validação direta — Sheet -> SOMA")
     print(f"   Linhas analisadas: {sheet_rows_count}")
     print(f"   Linhas confirmadas: {stats['confirmados']}")
     print(f"   Linhas corrigidas com segurança: {stats['corrigidos']}")
     print(f"   Linhas com divergência: {direct_divergences}")
 
-    print("\n2. Validação inversa — SOMA → Sheet")
+    print("\n   Transferências")
+    print(f"   Registros SOMA analisados: {stats['transferencias_soma_analisadas']}")
+    print(f"   Transferências confirmadas: {stats['transferencias_confirmadas']}")
+    print(f"   Transferências não encontradas: {stats['transferencias_ausentes']}")
+    print(f"   Duplicados idênticos encontrados: {stats['transferencias_duplicadas']}")
+    if apply_changes:
+        print(f"   Duplicados removidos do SOMA: {stats['transferencias_removidas']}")
+    else:
+        print("   Duplicados removidos do SOMA: 0 (modo simulação)")
+
+    print("\n2. Validação inversa — SOMA -> Sheet")
     print(f"   Documentos SOMA analisados: {soma_items_count}")
     print(f"   Documentos vinculados corretamente: {stats['inversa_confirmada']}")
     print(f"   Documentos duplicados na Sheet: {stats['inversa_duplicada']}")
@@ -145,17 +292,76 @@ def print_final_result(
 def run_round(start_date, end_date, apply_changes=False):
     orchestrator = DirectOrchestrator(Settings.from_env())
     orchestrator.auth.login()
-    all_rows = orchestrator.sheets.get_all_rows(only_entrada_saida=True)
+    all_rows = orchestrator.sheets.get_all_rows(only_entrada_saida=False)
     rows = [
         row for row in all_rows
-        if is_entrada_ou_saida(row.tipo)
+        if is_round_movement(row)
         and row_date_in_interval(row.data_mov, start_date, end_date)
     ]
     stats = Counter()
     updates = []
-    print(f"Linhas da sheet no período: {len(rows)}", flush=True)
+    audit_logger = logging.getLogger("soma_direct.audit")
+    previous_audit_level = audit_logger.level
+    audit_logger.setLevel(logging.ERROR)
+
+    soma_transfers = load_soma_transfers_interval(orchestrator, start_date, end_date)
+    stats["transferencias_soma_analisadas"] = len(soma_transfers)
+    transfers_by_key = defaultdict(list)
+    for transfer in soma_transfers:
+        key = transfer_key(
+            transfer.data,
+            transfer.valor_saida,
+            transfer.caixa_origem,
+            transfer.caixa_destino,
+        )
+        if (
+            clean_amount_for_comparison(transfer.valor_saida)
+            == clean_amount_for_comparison(transfer.valor_entrada)
+        ):
+            transfers_by_key[key].append(transfer)
+    processed_transfer_keys = set()
 
     for index, row in enumerate(rows, start=1):
+        if row.tipo == TipoMovimento.TRANSFERENCIA:
+            key = transfer_key(
+                row.data_mov,
+                row.importancia,
+                row.caixa_saida,
+                row.caixa,
+            )
+            matches = sorted(
+                transfers_by_key.get(key, []),
+                key=lambda transfer: int(transfer.transfer_id),
+            )
+            if not matches:
+                stats["divergentes"] += 1
+                stats["transferencias_ausentes"] += 1
+                audit_text = (
+                    "Transferência não encontrada no SOMA com a mesma data, "
+                    "valor, caixa de saída e caixa de destino"
+                )
+            else:
+                stats["confirmados"] += 1
+                stats["transferencias_confirmadas"] += 1
+                audit_text = "Confirmado"
+                if key not in processed_transfer_keys and len(matches) > 1:
+                    duplicates = matches[1:]
+                    stats["transferencias_duplicadas"] += len(duplicates)
+                    if apply_changes:
+                        for duplicate in duplicates:
+                            delete_soma_transfer(orchestrator, duplicate.transfer_id)
+                            stats["transferencias_removidas"] += 1
+                processed_transfer_keys.add(key)
+            updates.append({"row_idx": row.row_number, "auditoria": audit_text})
+            if apply_changes and len(updates) >= 25:
+                orchestrator.sheets.batch_update_audit_records(updates)
+                updates.clear()
+            if audit_text != "Confirmado":
+                print_row_error(row.row_number, audit_text, index, len(rows))
+            else:
+                render_progress(index, len(rows))
+            continue
+
         validation_error = orchestrator._validate_launch_row(row)
         if validation_error:
             audit_text = validation_error
@@ -177,6 +383,12 @@ def run_round(start_date, end_date, apply_changes=False):
                     or "Registo não confirmado no SOMA"
                 )
                 stats["divergentes"] += 1
+                if outcome.inconsistent and (
+                    "DADOS DOC" in audit_text
+                    or "CAIXA" in audit_text.upper()
+                    or "FORMA DE PAGAMENTO" in audit_text.upper()
+                ):
+                    audit_text = f"Falha Caixa/Forma em DADOS DOC ({audit_text})"
             update = {
                 "row_idx": row.row_number,
                 "auditoria": audit_text,
@@ -192,15 +404,21 @@ def run_round(start_date, end_date, apply_changes=False):
         if apply_changes and len(updates) >= 25:
             orchestrator.sheets.batch_update_audit_records(updates)
             updates.clear()
-        if index % 25 == 0 or index == len(rows):
-            print(f"Validação direta: {index}/{len(rows)}", flush=True)
+        if audit_text != "Confirmado":
+            print_row_error(row.row_number, audit_text, index, len(rows))
+        else:
+            render_progress(index, len(rows))
+
+    if rows:
+        print()
+    audit_logger.setLevel(previous_audit_level)
 
     if apply_changes and updates:
         orchestrator.sheets.batch_update_audit_records(updates)
 
     # Quinta validação: documentos do SOMA que não ficaram ligados à sheet.
     if apply_changes:
-        all_rows = orchestrator.sheets.get_all_rows(only_entrada_saida=True)
+        all_rows = orchestrator.sheets.get_all_rows(only_entrada_saida=False)
     soma_items = load_soma_interval(orchestrator, start_date, end_date)
     sheet_by_doc = defaultdict(list)
     for row in all_rows:
