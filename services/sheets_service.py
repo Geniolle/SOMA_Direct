@@ -293,7 +293,8 @@ class GoogleSheetsService:
         1. Lê todas as linhas da planilha.
         2. Agrupa lançamentos por lote de data (DATA MOV.), tipo (Entrada/Saída) e descrição base (sem data e sem Nxxx).
         3. Para lotes com sequenciais duplicados, fora de ordem ou DOCs SOMA duplicados:
-           - Re-sequencia a DESCRIÇÃO SOMA na ordem das linhas: f"{base} N{i:03d}" para i=1..len(items).
+           - Re-sequencia apenas linhas ainda sem DOC numérico. Linhas conciliadas preservam
+             a descrição confirmada no SOMA.
            - Limpa o DOC. SOMA, AUDITORIA e STATUS nas linhas subsequentes onde o DOC numérico foi duplicado.
         4. Se update_sheet=True, grava as alterações na planilha Google Sheets via batch_update.
         5. Retorna estatísticas e lista de linhas ajustadas.
@@ -362,7 +363,9 @@ class GoogleSheetsService:
                     row_upd = {"row_idx": r_idx}
                     changed = False
 
-                    if cur_desc != expected_desc:
+                    # Um DOC numérico já identifica inequivocamente o lançamento. A descrição
+                    # oficial do SOMA não pode ser sobrescrita pela ordem física da sheet.
+                    if not cur_doc.isdigit() and cur_desc != expected_desc:
                         row_upd["new_desc"] = expected_desc
                         total_desc_adjusted += 1
                         changed = True
