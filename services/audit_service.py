@@ -462,11 +462,11 @@ class AuditService:
         )
 
 
-    def audit_row(self, row: ContaOrdemRow) -> AuditOutcome:
+    def audit_row(self, row: ContaOrdemRow, allow_soma_mutation: bool = True) -> AuditOutcome:
         """Audita uma única linha seguindo a sequência estrita:
-        1. FASE 1: Pesquisa por Descrição + Data (Modo C - início da pesquisa)
-        2. FASE 2: Pesquisa por Lote de Data (Modo B - se Fase 1 não encontrar)
-        3. FASE 3: Pesquisa por DOC. SOMA (Modo A - última fase)
+        1. Pesquisa por DOC. SOMA.
+        2. Pesquisa por Descrição + Data.
+        3. Pesquisa por Lote de Data.
         
         Avança para o próximo registo assim que encontrar/corrigir,
         só passando à fase seguinte no mesmo registo se a anterior falhar.
@@ -479,6 +479,34 @@ class AuditService:
         target_val = clean_amount_for_comparison(row.importancia)
         target_desc = norm_basic(row.descricao_soma or row.descricao)
         inconsistencias: List[str] = []
+
+        # FASE 1: o DOC numérico é sempre a primeira evidência consultada.
+        if doc_soma and doc_soma.isdigit():
+            direct = self.search_by_codigo(doc_soma)
+            if direct is not None:
+                if allow_soma_mutation and "EM ABERTO" in (direct.status or "").upper():
+                    self.insert_soma_payment(
+                        doc_id=doc_soma,
+                        data_pagamento=row.data_mov,
+                        valor=row.importancia,
+                        caixa_str=row.caixa,
+                        forma_str=row.forma_pagamento,
+                    )
+                    direct = self.search_by_codigo(doc_soma) or direct
+                direct_status, direct_errors = self.validate_soma_record(row, direct)
+                if direct_status == "Confirmado":
+                    return self._process_dados_doc_and_finalize(row=row, matched_doc=doc_soma)
+                matched, desc_differs = self.matches_ignoring_code_and_suffix(row, direct)
+                if matched and desc_differs:
+                    return self._process_dados_doc_and_finalize(
+                        row=row,
+                        matched_doc=doc_soma,
+                        new_desc=direct.descricao,
+                        is_correction=True,
+                    )
+                inconsistencias = direct_errors
+            else:
+                inconsistencias = [f"Código {doc_soma} não existe no SOMA"]
 
         # =========================================================================
         # FASE 1: Pesquisa por Descrição + Data (Modo C - Início da Pesquisa)
@@ -505,7 +533,8 @@ class AuditService:
                                     "Linha %s: Lançamento DOC %s em aberto no SOMA. Inserindo pagamento com data %s...",
                                     row.row_number, cand.codigo, row.data_mov,
                                 )
-                                self.insert_soma_payment(
+                                if allow_soma_mutation:
+                                    self.insert_soma_payment(
                                     doc_id=cand.codigo,
                                     data_pagamento=row.data_mov,
                                     valor=row.importancia,
@@ -559,7 +588,8 @@ class AuditService:
                     if "EM ABERTO" in (cand.status or "").upper():
                         cand_val = clean_amount_for_comparison(cand.valor)
                         if cand_val == target_val and norm_basic(cand.tipo) == norm_basic(row.tipo.value):
-                            self.insert_soma_payment(
+                            if allow_soma_mutation:
+                                self.insert_soma_payment(
                                 doc_id=cand.codigo,
                                 data_pagamento=row.data_mov,
                                 valor=row.importancia,
@@ -644,7 +674,8 @@ class AuditService:
                         "Linha %s: Lançamento DOC %s em aberto no SOMA. Inserindo pagamento com data %s...",
                         row.row_number, doc_soma, row.data_mov,
                     )
-                    self.insert_soma_payment(
+                    if allow_soma_mutation:
+                        self.insert_soma_payment(
                         doc_id=doc_soma,
                         data_pagamento=row.data_mov,
                         valor=row.importancia,

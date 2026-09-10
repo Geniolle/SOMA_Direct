@@ -41,3 +41,21 @@ python main.py
 # Ou especificar linhas pontuais
 python main.py 4248 4246 4247
 ```
+## Ronda completa por intervalo
+
+Execute sem parâmetros para informar o intervalo e o modo interativamente:
+
+```powershell
+.\.venv\Scripts\python.exe .\ronda_completa.py
+```
+
+Também é possível executar sem perguntas:
+
+```powershell
+.\.venv\Scripts\python.exe .\ronda_completa.py --inicio 01/08/2026 --fim 31/08/2026 --simulation
+.\.venv\Scripts\python.exe .\ronda_completa.py --inicio 01/08/2026 --fim 31/08/2026 --apply
+```
+
+O modo de simulação é somente leitura. O modo de aplicação grava `Confirmado`
+quando todas as validações passam ou a mensagem concreta da divergência em
+`AUDITORIA`.

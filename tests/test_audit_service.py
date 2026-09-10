@@ -329,9 +329,9 @@ def test_audit_row_three_phase_sequence(monkeypatch):
     # Deve encontrar na Fase 1 e NÃO chamar Fase 2 nem Fase 3!
     assert outcome.corrected is True
     assert outcome.new_doc == "5500999"
+    assert calls[0][0] == "fase3_codigo"
     assert any(c[0] == "fase1_desc" for c in calls)
     assert not any(c[0] == "fase2_periodo" for c in calls)
-    assert not any(c[0] == "fase3_codigo" for c in calls)
 
 
 def test_audit_row_corrects_divergent_sequential_in_sheet(monkeypatch):
