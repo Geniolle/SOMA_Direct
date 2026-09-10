@@ -57,7 +57,7 @@ class DirectOrchestrator:
         validation_error = self._validate_launch_row(row)
         if validation_error:
             outcome = OperationOutcome(False, "", row.tipo.value, row.row_number, 0, error_message=validation_error)
-            self.sheets.mark_row_failed(row.row_number, validation_error)
+            self.sheets.mark_row_validation_error(row.row_number, validation_error)
             return outcome
 
         claim = self.sheets.claim_row(row.row_number)
@@ -75,10 +75,11 @@ class DirectOrchestrator:
     def _validate_launch_row(row: ContaOrdemRow) -> Optional[str]:
         required = {
             "DATA MOV.": row.data_mov,
-            "DESCRIÇÃO/DESCRIÇÃO SOMA": row.descricao_soma or row.descricao,
+            "TIPO": row.tipo.value if is_entrada_ou_saida(row.tipo) else "",
             "IMPORTÂNCIA": row.importancia,
             "PLANO DE CONTA": row.plano_conta,
             "CENTRO DE CUSTO": row.centro_custo,
+            "DESCRIÇÃO SOMA": row.descricao_soma,
             "CAIXA": row.caixa,
             "FORMA DE PAGAMENTO": row.forma_pagamento,
         }
