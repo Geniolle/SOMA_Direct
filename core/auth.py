@@ -18,7 +18,10 @@ class SomaAuthenticator:
         self.is_authenticated = False
 
     def login(self) -> bool:
-        logger.info(f"Iniciando autenticação direta para {self.settings.site_user}...")
+        if not self.settings.site_user or not self.settings.site_password:
+            logger.error("SITE_USER e SITE_PASSWORD devem ser definidos no ambiente.")
+            return False
+        logger.info("Iniciando autenticação direta no SOMA...")
         
         # 1. Login via buscaUser.php
         busca_url = "https://verbodavida.info/apps/sys/buscaUser.php"

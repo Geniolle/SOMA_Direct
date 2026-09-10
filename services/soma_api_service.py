@@ -4,10 +4,11 @@ import logging
 import re
 import time
 import unicodedata
+from html import unescape
 from typing import Any, Dict, Optional, Tuple
 from config.settings import Settings
 from core.http_session import ResilientSession
-from domain.models import ContaOrdemRow, OperationOutcome, TipoMovimento
+from domain.models import ContaOrdemRow, OperationOutcome, TipoMovimento, norm_basic
 
 logger = logging.getLogger("soma_direct.service")
 
@@ -31,6 +32,7 @@ class SomaApiService:
         self._centro_custo_map: Dict[str, str] = {}
         self._caixas_map: Dict[str, str] = {}
         self._loaded_catalogs = False
+        self._confirmation_attempts = 5
 
     def load_catalogs(self) -> None:
         """Carrega os dropdowns oficiais de Planos de Conta, Centro de Custo e Caixas."""
@@ -52,11 +54,23 @@ class SomaApiService:
                 clean_name = self._norm(opt_name)
                 self._plano_contas_map[clean_name] = opt_id
 
-        # 2. Centro de Custos
-        cc_opts = re.findall(r"""<select[^>]*name=['"]id_centro_custo['"][^>]*>(.*?)</select>""", html, re.DOTALL | re.IGNORECASE)
-        if cc_opts:
-            for opt_id, opt_name in re.findall(r"""<option[^>]*value=['"](\d+)['"][^>]*>(.*?)</option>""", cc_opts[0]):
-                self._centro_custo_map[self._norm(opt_name)] = opt_id
+        # 2. Centro de Custos. O formulário inicial contém apenas "PADRÃO";
+        # o JavaScript entradas_saidas_dados_v2.js carrega as opções via AJAX.
+        cc_resp = self.http.post(
+            f"{self.base_url}sys/post/buscarCentrodeCustoSelect.php",
+            data={"id": self.settings.institution_id},
+        )
+        if not 200 <= cc_resp.status_code < 300:
+            raise RuntimeError(f"Falha ao carregar centros de custo: HTTP {cc_resp.status_code}")
+        for opt_id, opt_name in re.findall(
+            r"""<option[^>]*value=['"](\d+)['"][^>]*>(.*?)</option>""",
+            cc_resp.text,
+            re.DOTALL | re.IGNORECASE,
+        ):
+            clean_name = unescape(re.sub(r"<[^>]+>", " ", opt_name))
+            self._centro_custo_map[self._norm(clean_name)] = opt_id
+        if not self._centro_custo_map:
+            raise RuntimeError("O SOMA devolveu um catálogo vazio de centros de custo")
 
         # 3. Caixas
         cx_resp = self.http.post(f"{self.base_url}sys/post/buscarCaixas.php", data={"id": self.settings.institution_id})
@@ -70,6 +84,16 @@ class SomaApiService:
         s2 = unicodedata.normalize("NFKD", (s or ""))
         return "".join(c for c in s2 if not unicodedata.combining(c)).strip().lower()
 
+    @staticmethod
+    def _http_error(resp: Any) -> Optional[str]:
+        if not 200 <= resp.status_code < 300:
+            return f"HTTP {resp.status_code} devolvido pelo SOMA"
+        body = norm_basic(resp.text)
+        error_markers = ("erro", "falha", "não foi possível", "nao foi possivel", "acesso negado")
+        if any(marker in body for marker in error_markers):
+            return "O SOMA devolveu uma mensagem de erro ao gravar o documento"
+        return None
+
     def resolve_plano_id(self, plano_name: str) -> str:
         self.load_catalogs()
         target = self._norm(plano_name)
@@ -79,7 +103,7 @@ class SomaApiService:
         for k, v in self._plano_contas_map.items():
             if target in k or k in target:
                 return v
-        return "398"  # fallback default
+        raise ValueError(f"Plano de conta não encontrado no SOMA: '{plano_name}'")
 
     def resolve_centro_custo_id(self, centro_name: str) -> str:
         self.load_catalogs()
@@ -89,7 +113,7 @@ class SomaApiService:
         for k, v in self._centro_custo_map.items():
             if target in k or k in target:
                 return v
-        return "5206"  # fallback default
+        raise ValueError(f"Centro de custo não encontrado no SOMA: '{centro_name}'")
 
     def resolve_caixa_id(self, caixa_name: str) -> str:
         self.load_catalogs()
@@ -99,7 +123,7 @@ class SomaApiService:
         for k, v in self._caixas_map.items():
             if target in k or k in target:
                 return v
-        return "1"
+        raise ValueError(f"Caixa não encontrado no SOMA: '{caixa_name}'")
 
     def _find_doc_id(self, tipo: str, descricao: str, valor: str, data_mov: str) -> Optional[str]:
         """Consulta buscarEntradasSaidas.php e retorna o CODIGO do documento estritamente correspondente."""
@@ -118,13 +142,24 @@ class SomaApiService:
         }
         resp = self.http.post_ajax(f"{self.base_url}sys/post/buscarEntradasSaidas.php", data=search_payload)
         clean_val = clean_amount(valor)
+        target_desc = norm_basic(descricao)
+        matches = []
         for rw in re.findall(r'<tr\b[^>]*>(.*?)</tr>', resp.text, re.DOTALL):
-            cells = [re.sub(r'<[^>]+>', ' ', c).strip() for c in re.findall(r'<t[dh]\b[^>]*>(.*?)</t[dh]>', rw, re.DOTALL)]
+            cells = [unescape(re.sub(r'<[^>]+>', ' ', c)).strip() for c in re.findall(r'<t[dh]\b[^>]*>(.*?)</t[dh]>', rw, re.DOTALL)]
+            row_text = " ".join(cells)
+            if clean_val not in row_text or (data_mov and data_mov not in row_text):
+                continue
+            if target_desc and not any(norm_basic(cell) == target_desc for cell in cells):
+                continue
             for c in cells:
                 if c.isdigit() and len(c) >= 5:
-                    row_text = " ".join(cells)
-                    if clean_val in row_text and (not data_mov or data_mov in row_text):
-                        return c
+                    matches.append(c)
+                    break
+        unique = list(dict.fromkeys(matches))
+        if len(unique) == 1:
+            return unique[0]
+        if len(unique) > 1:
+            logger.error("Busca ambígua no SOMA: %d documentos correspondem aos mesmos campos.", len(unique))
         return None
 
     def _find_transfer_id(self, valor: str, data_mov: str) -> Optional[str]:
@@ -143,6 +178,16 @@ class SomaApiService:
         m = re.search(r'class="[^"]*selectable-item[^"]*"[^>]*value=["\'](\d+)["\']', resp.text)
         if m:
             return m.group(1)
+        return None
+
+    def _wait_find_doc(self, tipo: str, descricao: str, valor: str, data_mov: str) -> Optional[str]:
+        """Aguarda a consistência do índice de pesquisa após a criação."""
+        for attempt in range(self._confirmation_attempts):
+            doc_id = self._find_doc_id(tipo, descricao, valor, data_mov)
+            if doc_id:
+                return doc_id
+            if attempt < self._confirmation_attempts - 1:
+                time.sleep(1)
         return None
 
     def criar_saida(self, row: ContaOrdemRow) -> OperationOutcome:
@@ -179,38 +224,16 @@ class SomaApiService:
 
         url = f"{self.base_url}?mod=app&exec=entradas_saidas&faz=dados"
         resp = self.http.post(url, data=payload)
-        
-        # Consulta imediatamente o DOC gerado
-        doc_id = self._find_doc_id(tipo="0", descricao=row.descricao_soma or row.descricao, valor=row.importancia, data_mov=row.data_mov)
-        
-        if not doc_id:
-            m = re.search(r'"id":\s*"?(\d+)"?', resp.text) or re.search(r'ID=(\d+)', resp.text)
-            if m:
-                doc_id = m.group(1)
+        http_error = self._http_error(resp)
+        if http_error:
+            return OperationOutcome(False, "", "Saída", row.row_number, int((time.perf_counter() - t0) * 1000), error_message=http_error)
 
-        # Se forma de pagamento for dinheiro, registra o pagamento para quitação imediata
-        if doc_id and "DINHEIRO" in (row.forma_pagamento or "").upper():
-            try:
-                pag_url = f"{self.base_url}?mod=app&exec=entradas_saidas&faz=dados&ID={doc_id}"
-                self.http.post(pag_url, data={
-                    "fluxo_desconto": "0,00",
-                    "fluxo_valor": clean_amount(row.importancia),
-                    "data_pagamento": row.data_mov,
-                    "forma_pagamento": "0",
-                    "num_cheque": "",
-                    "num_documento": "",
-                    "valor_pagamento": clean_amount(row.importancia),
-                    "id_caixa": caixa_id,
-                    "id_fluxo": f"{int(doc_id):010d}",
-                    "add": "1"
-                })
-            except Exception as e:
-                logger.warning(f"Aviso ao registrar baixa de pagamento para {doc_id}: {e}")
+        # Consulta imediatamente o DOC gerado
+        doc_id = self._wait_find_doc(tipo="0", descricao=row.descricao_soma or row.descricao, valor=row.importancia, data_mov=row.data_mov)
 
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
-        
         if not doc_id:
-            doc_id = f"DOC_SAIDA_{row.row_number}_{int(time.time())}"
+            return OperationOutcome(False, "", "Saída", row.row_number, elapsed_ms, error_message="POST concluído, mas o documento não foi confirmado de forma inequívoca no SOMA")
 
         dados_doc = f"Registrado(a) em: {time.strftime('%d/%m/%Y %H:%M:%S')}, {row.caixa}, {row.forma_pagamento}. Baixa realizada por {self.settings.user_job_id}"
         return OperationOutcome(
@@ -252,17 +275,16 @@ class SomaApiService:
 
         url = f"{self.base_url}?mod=app&exec=entradas_saidas&faz=dados"
         resp = self.http.post(url, data=payload)
-        
-        doc_id = self._find_doc_id(tipo="1", descricao=row.descricao_soma or row.descricao, valor=row.importancia, data_mov=row.data_mov)
-        if not doc_id:
-            m = re.search(r'"id":\s*"?(\d+)"?', resp.text) or re.search(r'ID=(\d+)', resp.text)
-            if m:
-                doc_id = m.group(1)
+        http_error = self._http_error(resp)
+        if http_error:
+            return OperationOutcome(False, "", "Entrada", row.row_number, int((time.perf_counter() - t0) * 1000), error_message=http_error)
+
+        doc_id = self._wait_find_doc(tipo="1", descricao=row.descricao_soma or row.descricao, valor=row.importancia, data_mov=row.data_mov)
 
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
 
         if not doc_id:
-            doc_id = f"DOC_ENTRADA_{row.row_number}_{int(time.time())}"
+            return OperationOutcome(False, "", "Entrada", row.row_number, elapsed_ms, error_message="POST concluído, mas o documento não foi confirmado de forma inequívoca no SOMA")
 
         dados_doc = f"Registrado(a) em: {time.strftime('%d/%m/%Y %H:%M:%S')}, {row.caixa}, {row.forma_pagamento}. Baixa realizada por {self.settings.user_job_id}"
         return OperationOutcome(
@@ -295,10 +317,13 @@ class SomaApiService:
 
         url = f"{self.base_url}?mod=ivv&exec=transferencias_caixas_dados"
         resp = self.http.post(url, data=payload)
-        
+        http_error = self._http_error(resp)
+        if http_error:
+            return OperationOutcome(False, "", "Transferência", row.row_number, int((time.perf_counter() - t0) * 1000), error_message=http_error)
+
         doc_id = self._find_transfer_id(valor=row.importancia, data_mov=row.data_mov)
         if not doc_id:
-            doc_id = f"TRF_{row.row_number}_{int(time.time())}"
+            return OperationOutcome(False, "", "Transferência", row.row_number, int((time.perf_counter() - t0) * 1000), error_message="Transferência não confirmada no SOMA")
         else:
             doc_id = f"TRF_{doc_id}"
 

@@ -23,15 +23,16 @@ class ResilientSession:
         "X-Requested-With": "XMLHttpRequest",
     }
 
-    def __init__(self, timeout: int = 35, max_retries: int = 3):
+    def __init__(self, timeout: int = 35, max_retries: int = 3, verify_tls: bool = True):
         self.session = requests.Session()
         self.session.headers.update(self.DEFAULT_HEADERS)
         self.timeout = timeout
         self.max_retries = max_retries
+        self.verify_tls = verify_tls
 
     def get(self, url: str, params: Optional[Dict[str, Any]] = None, **kwargs) -> requests.Response:
         kwargs.setdefault("timeout", self.timeout)
-        kwargs.setdefault("verify", False)
+        kwargs.setdefault("verify", self.verify_tls)
         retries = kwargs.pop("retries", self.max_retries)
         for attempt in range(1, retries + 1):
             try:
@@ -47,8 +48,9 @@ class ResilientSession:
 
     def post(self, url: str, data: Optional[Any] = None, files: Optional[Any] = None, **kwargs) -> requests.Response:
         kwargs.setdefault("timeout", self.timeout)
-        kwargs.setdefault("verify", False)
-        retries = kwargs.pop("retries", self.max_retries)
+        kwargs.setdefault("verify", self.verify_tls)
+        # POSTs may create financial records. They are never retried implicitly.
+        retries = kwargs.pop("retries", 1)
         for attempt in range(1, retries + 1):
             try:
                 return self.session.post(url, data=data, files=files, **kwargs)

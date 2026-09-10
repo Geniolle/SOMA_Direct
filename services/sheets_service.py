@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+import uuid
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -139,6 +140,31 @@ class GoogleSheetsService:
                     else:
                         raise
 
+    def claim_row(self, row_idx: int) -> Optional[str]:
+        """Tenta reservar uma linha e confirma que este processo venceu a disputa."""
+        headers = self.get_headers()
+        header_map = {norm_basic(h): i + 1 for i, h in enumerate(headers)}
+        status_col = header_map.get(norm_basic("STATUS"))
+        if not status_col:
+            raise RuntimeError("Coluna STATUS não encontrada na CONTAORDEM")
+        token = f"EM PROCESSAMENTO:{int(time.time())}:{uuid.uuid4().hex}"
+        cell = f"{self._col_letter(status_col)}{row_idx}"
+        self._ws.update(cell, [[token]])
+        current = self._ws.acell(cell).value or ""
+        return token if current == token else None
+
+    def mark_row_failed(self, row_idx: int, message: str) -> None:
+        """Liberta a reserva e registra uma falha sem inventar DOC. SOMA."""
+        headers = self.get_headers()
+        header_map = {norm_basic(h): i + 1 for i, h in enumerate(headers)}
+        updates = []
+        for name, value in (("STATUS", "EM ERRO"), ("DADOS DOC", str(message)[:450])):
+            col = header_map.get(norm_basic(name))
+            if col:
+                updates.append({"range": f"{self._col_letter(col)}{row_idx}", "values": [[value]]})
+        if updates:
+            self._ws.batch_update(updates)
+
     def mark_row_audit(
         self,
         row_idx: int,
@@ -204,6 +230,10 @@ class GoogleSheetsService:
                 cells.append(("DADOS DOC", upd["dados_doc"]))
             if upd.get("status") is not None:
                 cells.append(("STATUS", upd["status"]))
+            if upd.get("new_caixa") is not None:
+                cells.append(("CAIXA", upd["new_caixa"]))
+            if upd.get("new_forma_pagamento") is not None:
+                cells.append(("FORMA DE PAGAMENTO", upd["new_forma_pagamento"]))
 
             for col_name, val in cells:
                 col_norm = norm_basic(col_name)

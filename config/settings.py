@@ -31,6 +31,8 @@ class Settings:
     # Execução
     timeout_seconds: int = 25
     user_job_id: str = "USERJOB"
+    verify_tls: bool = True
+    claim_stale_seconds: int = 900
     
     @classmethod
     def from_env(cls, env_path: Optional[str] = None) -> "Settings":
@@ -40,8 +42,8 @@ class Settings:
             load_dotenv(dotenv_path="C:/workspace/SOMA/.env", override=False)
             
         return cls(
-            site_user=os.getenv("SITE_USER", "familialopesemportugal@gmail.com"),
-            site_password=os.getenv("SITE_PASSWORD", "P@1internet"),
+            site_user=os.getenv("SITE_USER", ""),
+            site_password=os.getenv("SITE_PASSWORD", ""),
             site_login_url=os.getenv("SITE_LOGIN_URL", "https://verbodavida.info/apps/index.php"),
             site_base_url=os.getenv("SITE_HOME_URL", "https://verbodavida.info/IVV/"),
             institution_id=os.getenv("INSTITUTION_ID", "270"),
@@ -52,4 +54,6 @@ class Settings:
             sheet_soma=os.getenv("SHEET_SOMA", "SOMA"),
             timeout_seconds=int(os.getenv("TIMEOUT_SECONDS", "25") or 25),
             user_job_id=os.getenv("IDUSER", "USERJOB") or "USERJOB",
+            verify_tls=os.getenv("VERIFY_TLS", "true").strip().lower() not in ("0", "false", "no"),
+            claim_stale_seconds=int(os.getenv("CLAIM_STALE_SECONDS", "900") or 900),
         )

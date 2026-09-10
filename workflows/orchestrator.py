@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import logging
 import time
+from decimal import Decimal, InvalidOperation
+from dataclasses import replace
 from typing import List, Optional
 from config.settings import Settings
 from core.auth import SomaAuthenticator
 from core.http_session import ResilientSession
-from domain.models import AuditOutcome, ContaOrdemRow, OperationOutcome, TipoMovimento, is_entrada_ou_saida
+from domain.models import AuditOutcome, ContaOrdemRow, OperationOutcome, TipoMovimento, format_amount_for_input, is_entrada_ou_saida
 from services.audit_service import AuditService
 from services.duplicate_checker import DuplicateChecker
 from services.sheets_service import GoogleSheetsService
@@ -20,7 +22,10 @@ class DirectOrchestrator:
 
     def __init__(self, settings: Optional[Settings] = None):
         self.settings = settings or Settings.from_env()
-        self.http = ResilientSession(timeout=self.settings.timeout_seconds)
+        self.http = ResilientSession(
+            timeout=self.settings.timeout_seconds,
+            verify_tls=self.settings.verify_tls,
+        )
         self.auth = SomaAuthenticator(self.settings, self.http)
         self.api = SomaApiService(self.settings, self.http)
         self.duplicate_checker = DuplicateChecker(self.api)
@@ -49,9 +54,74 @@ class DirectOrchestrator:
                 dados_doc="Execução simulada (dry-run)"
             )
 
+        validation_error = self._validate_launch_row(row)
+        if validation_error:
+            outcome = OperationOutcome(False, "", row.tipo.value, row.row_number, 0, error_message=validation_error)
+            self.sheets.mark_row_failed(row.row_number, validation_error)
+            return outcome
+
+        claim = self.sheets.claim_row(row.row_number)
+        if not claim:
+            return OperationOutcome(False, "", row.tipo.value, row.row_number, 0, error_message="Linha reservada por outro processo")
+
+        try:
+            return self._process_claimed_row(row)
+        except Exception as exc:
+            logger.exception("Falha ao processar linha %s", row.row_number)
+            self.sheets.mark_row_failed(row.row_number, str(exc))
+            return OperationOutcome(False, "", row.tipo.value, row.row_number, 0, error_message=str(exc))
+
+    @staticmethod
+    def _validate_launch_row(row: ContaOrdemRow) -> Optional[str]:
+        required = {
+            "DATA MOV.": row.data_mov,
+            "DESCRIÇÃO/DESCRIÇÃO SOMA": row.descricao_soma or row.descricao,
+            "IMPORTÂNCIA": row.importancia,
+            "PLANO DE CONTA": row.plano_conta,
+            "CENTRO DE CUSTO": row.centro_custo,
+            "CAIXA": row.caixa,
+            "FORMA DE PAGAMENTO": row.forma_pagamento,
+        }
+        missing = [name for name, value in required.items() if not str(value or "").strip()]
+        if missing:
+            return "Campos obrigatórios ausentes: " + ", ".join(missing)
+        try:
+            amount = Decimal(format_amount_for_input(row.importancia).replace(",", "."))
+            if amount <= 0:
+                raise InvalidOperation
+        except (InvalidOperation, ValueError):
+            return f"IMPORTÂNCIA inválida: '{row.importancia}'"
+        return None
+
+    def _confirm_and_settle(self, row: ContaOrdemRow, doc_id: str) -> Optional[str]:
+        record = self.audit_service.search_by_codigo(doc_id)
+        if not record:
+            return "Documento não localizado por código após o lançamento"
+        if "EM ABERTO" in (record.status or "").upper() or str(record.baixa or "").strip().upper() != "SIM":
+            if not self.audit_service.insert_soma_payment(
+                doc_id=doc_id,
+                data_pagamento=row.data_mov,
+                valor=row.importancia,
+                caixa_str=row.caixa,
+                forma_str=row.forma_pagamento,
+            ):
+                return "Documento criado, mas pagamento/baixa não foi confirmado no SOMA"
+            record = self.audit_service.search_by_codigo(doc_id)
+        validation_row = replace(row, doc_soma=doc_id)
+        status, inconsistencies = self.audit_service.validate_soma_record(validation_row, record)
+        if status != "Confirmado":
+            return "; ".join(inconsistencies) or "Documento criado, mas não passou na conferência final"
+        return None
+
+    def _process_claimed_row(self, row: ContaOrdemRow) -> OperationOutcome:
+
         # 1. Pré-checagem de duplicidade no SOMA
         existing_doc = self.duplicate_checker.check_exists(row)
         if existing_doc:
+            confirmation_error = self._confirm_and_settle(row, existing_doc)
+            if confirmation_error:
+                self.sheets.mark_row_failed(row.row_number, confirmation_error)
+                return OperationOutcome(False, existing_doc, row.tipo.value, row.row_number, 0, error_message=confirmation_error)
             logger.info(f"-> Registro já lançado anteriormente no SOMA com DOC {existing_doc}. Atualizando planilha...")
             self.sheets.mark_row_completed(
                 row_idx=row.row_number,
@@ -78,6 +148,12 @@ class DirectOrchestrator:
 
         # 3. Atualização na planilha Google Sheets
         if outcome.success:
+            confirmation_error = self._confirm_and_settle(row, outcome.doc_id)
+            if confirmation_error:
+                outcome.success = False
+                outcome.error_message = confirmation_error
+                self.sheets.mark_row_failed(row.row_number, confirmation_error)
+                return outcome
             logger.info(f"-> SUCESSO Linha {row.row_number}: DOC. SOMA={outcome.doc_id} em {outcome.elapsed_ms}ms")
             self.sheets.mark_row_completed(
                 row_idx=row.row_number,
@@ -87,6 +163,7 @@ class DirectOrchestrator:
             )
         else:
             logger.error(f"-> ERRO Linha {row.row_number}: {outcome.error_message}")
+            self.sheets.mark_row_failed(row.row_number, outcome.error_message)
 
         return outcome
 
@@ -120,7 +197,15 @@ class DirectOrchestrator:
         pending = []
         for r in all_rows:
             doc = (r.doc_soma or "").strip().upper()
-            if not doc or doc in ("EM PROCESSAMENTO", "EM ERRO"):
+            processing = r.status.upper().startswith("EM PROCESSAMENTO")
+            stale = False
+            if processing:
+                parts = r.status.split(":", 2)
+                try:
+                    stale = len(parts) >= 2 and time.time() - int(parts[1]) > self.settings.claim_stale_seconds
+                except ValueError:
+                    stale = False
+            if (not doc or doc == "EM ERRO") and (not processing or stale):
                 pending.append(r)
 
         if limit and limit > 0:
