@@ -33,6 +33,7 @@ class Settings:
     user_job_id: str = "USERJOB"
     verify_tls: bool = True
     claim_stale_seconds: int = 900
+    reconciliation_interval_seconds: int = 3600
     
     @classmethod
     def from_env(cls, env_path: Optional[str] = None) -> "Settings":
@@ -56,4 +57,5 @@ class Settings:
             user_job_id=os.getenv("IDUSER", "USERJOB") or "USERJOB",
             verify_tls=os.getenv("VERIFY_TLS", "true").strip().lower() not in ("0", "false", "no"),
             claim_stale_seconds=int(os.getenv("CLAIM_STALE_SECONDS", "900") or 900),
+            reconciliation_interval_seconds=int(os.getenv("RECONCILIATION_INTERVAL_SECONDS", "3600") or 3600),
         )

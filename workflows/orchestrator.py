@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import defaultdict
 from decimal import Decimal, InvalidOperation
 from dataclasses import replace
 from typing import List, Optional
@@ -18,6 +19,8 @@ from domain.models import (
     is_entrada_ou_saida,
     norm_basic,
     normalize_date_str,
+    normalize_document_value,
+    validate_dados_doc,
 )
 from services.audit_service import AuditService
 from services.duplicate_checker import DuplicateChecker
@@ -319,6 +322,84 @@ class DirectOrchestrator:
     def harmonize_sequentials_and_duplicates(self, dry_run: bool = False):
         """Pré-validação e harmonização de sequenciais Nxxx e remoção de DOCs SOMA duplicados na folha."""
         return self.sheets.harmonize_sequentials_and_duplicates(update_sheet=not dry_run)
+
+    def reconcile_scheduled_descriptions(self) -> dict:
+        """Harmoniza sequenciais e corrige descrições/DOCs apenas com prova inequívoca."""
+        harmonized = self.sheets.harmonize_sequentials_and_duplicates(update_sheet=True)
+        rows = self.sheets.get_all_rows(only_entrada_saida=True)
+        targets = [
+            row for row in rows
+            if row.status.strip() == "Duplicidade" or row.auditoria.startswith("Duplicidade:")
+        ]
+        doc_users = defaultdict(set)
+        for row in rows:
+            doc = normalize_document_value(row.doc_soma)
+            if doc.isdigit():
+                doc_users[doc].add(row.row_number)
+
+        updates = []
+        resolved = 0
+        unresolved = 0
+        for row in targets:
+            current_doc = normalize_document_value(row.doc_soma)
+            candidates = []
+            if current_doc.isdigit():
+                found = self.audit_service.search_by_codigo(current_doc)
+                if found:
+                    candidates = [found]
+            else:
+                candidates = [
+                    item for item in self.audit_service.search_by_descricao(row.descricao_soma, row.data_mov)
+                    if norm_basic(item.descricao) == norm_basic(row.descricao_soma)
+                    and normalize_date_str(item.data) == normalize_date_str(row.data_mov)
+                ]
+
+            valid = []
+            for item in candidates:
+                doc = normalize_document_value(item.codigo)
+                if clean_amount_for_comparison(item.valor) != clean_amount_for_comparison(row.importancia):
+                    continue
+                if norm_basic(item.tipo) != norm_basic(row.tipo.value):
+                    continue
+                if norm_basic(item.status) != "pago" or norm_basic(item.baixa) != "sim":
+                    continue
+                if doc_users[doc] - {row.row_number}:
+                    continue
+                dados = self.audit_service.fetch_dados_doc(doc)
+                dados_ok, _ = validate_dados_doc(dados or row.dados_doc, row.caixa, row.forma_pagamento)
+                if dados_ok:
+                    valid.append((item, dados))
+
+            if len(valid) == 1:
+                item, dados = valid[0]
+                doc = normalize_document_value(item.codigo)
+                updates.append({
+                    "row_idx": row.row_number,
+                    "new_doc": doc,
+                    "new_desc": item.descricao,
+                    "status": "VALIDADO",
+                    "auditoria": "Descrição/DOC reconciliados automaticamente",
+                    "dados_doc": dados or row.dados_doc,
+                })
+                doc_users[doc].add(row.row_number)
+                resolved += 1
+            else:
+                updates.append({
+                    "row_idx": row.row_number,
+                    "new_doc": "Analisar",
+                    "status": "Duplicidade",
+                    "auditoria": f"Duplicidade pendente: {len(valid)} candidato(s) inequívoco(s)",
+                })
+                unresolved += 1
+
+        if updates:
+            self.sheets.batch_update_audit_records(updates)
+        return {
+            "targets": len(targets),
+            "resolved": resolved,
+            "unresolved": unresolved,
+            "harmonized": harmonized,
+        }
 
 
 

@@ -36,7 +36,7 @@ def _get_interval() -> int:
         return 60
 
 
-def run_cycle(orchestrator: DirectOrchestrator) -> None:
+def run_cycle(orchestrator: DirectOrchestrator, run_maintenance: bool = False) -> None:
     now_str = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
     logging.info(f"--- [CICLO AGENDADO] Iniciando ronda em {now_str} ---")
 
@@ -48,6 +48,9 @@ def run_cycle(orchestrator: DirectOrchestrator) -> None:
             logging.info(f"[CICLO AGENDADO] Concluído: {len(outcomes)} itens processados ({sucessos} sucesso, {falhas} falha).")
         else:
             logging.info("[CICLO AGENDADO] Nenhuma linha pendente para processamento no momento.")
+        if run_maintenance:
+            stats = orchestrator.reconcile_scheduled_descriptions()
+            logging.info("[MANUTENÇÃO AGENDADA] Resultado: %s", stats)
     except Exception as exc:
         logging.error(f"[CICLO AGENDADO] Erro durante a ronda: {exc}", exc_info=True)
 
@@ -67,14 +70,20 @@ def main():
     orchestrator = DirectOrchestrator()
 
     if args.once:
-        run_cycle(orchestrator)
+        run_cycle(orchestrator, run_maintenance=True)
         return 0
 
     interval = _get_interval()
+    maintenance_interval = max(300, orchestrator.settings.reconciliation_interval_seconds)
+    last_maintenance = 0.0
     logging.info(f"Modo contínuo ativo. Intervalo entre rondas: {interval} segundos.")
 
     while running:
-        run_cycle(orchestrator)
+        now = time.monotonic()
+        run_maintenance = now - last_maintenance >= maintenance_interval
+        run_cycle(orchestrator, run_maintenance=run_maintenance)
+        if run_maintenance:
+            last_maintenance = time.monotonic()
 
         logging.info(f"Aguardando {interval}s para a próxima verificação...")
         for _ in range(interval):
