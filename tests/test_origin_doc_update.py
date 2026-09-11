@@ -16,8 +16,8 @@ class FakeWorksheet:
     def update(self, cell, values):
         self.updates.append((cell, values))
 
-    def batch_update(self, updates):
-        self.updates.append(("batch", updates))
+    def batch_update(self, updates, **kwargs):
+        self.updates.append(("batch", updates, kwargs))
 
 
 class FakeSpreadsheet:
@@ -34,7 +34,7 @@ def make_service(origin):
     service._ws = FakeWorksheet([])
     service._gc = SimpleNamespace()
     service.settings = SimpleNamespace(user_job_id="JOB")
-    service._headers_cache = ["DOC. SOMA", "STATUS", "AUDITORIA", "IDUSER", "TIMESTAMP"]
+    service._headers_cache = ["DOC. SOMA", "LINK", "STATUS", "AUDITORIA", "IDUSER", "TIMESTAMP"]
     return service
 
 
@@ -54,7 +54,12 @@ def test_completed_row_updates_origin_by_id_before_contaordem():
 
     assert origin.updates == [("C2", [["5500123"]])]
     assert service._ws.updates[0][0] == "batch"
-    assert {item["range"]: item["values"] for item in service._ws.updates[0][1]}["A8"] == [["5500123"]]
+    updates = {item["range"]: item["values"] for item in service._ws.updates[0][1]}
+    assert updates["A8"] == [["5500123"]]
+    assert updates["B8"] == [[
+        '=HYPERLINK("https://verbodavida.info/IVV/?mod=ivv&exec=entradas_saidas_dados&ID=5500123";"ACESSAR SOMA")'
+    ]]
+    assert service._ws.updates[0][2]["value_input_option"] == "USER_ENTERED"
 
 
 def test_origin_update_rejects_duplicate_internal_id():
@@ -80,3 +85,23 @@ def test_origin_update_overwrites_another_document():
     service._update_origin_doc("T_EXTRATO", "EXT001", "5500123")
 
     assert origin.updates == [("B2", [["5500123"]])]
+
+
+@pytest.mark.parametrize("doc_id", ["", "123456", "12345678", "ABC1234", "Analisar"])
+def test_completed_row_only_accepts_exactly_seven_numeric_digits(doc_id):
+    origin = FakeWorksheet([
+        ["ID_INTERNO", "DOC. SOMA"],
+        ["EXT001", "4400000"],
+    ])
+    service = make_service(origin)
+
+    with pytest.raises(ValueError, match="exatamente 7 dígitos"):
+        service.mark_row_completed(
+            row_idx=8,
+            doc_id=doc_id,
+            processo="T_EXTRATO",
+            id_interno="EXT001",
+        )
+
+    assert origin.updates == []
+    assert service._ws.updates == []

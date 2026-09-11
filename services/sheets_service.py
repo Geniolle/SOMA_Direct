@@ -8,7 +8,7 @@ from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
 import gspread
-from gspread.utils import ValueRenderOption
+from gspread.utils import ValueInputOption, ValueRenderOption
 
 from config.settings import Settings
 from domain.models import (
@@ -171,18 +171,31 @@ class GoogleSheetsService:
         id_interno: str = "",
     ) -> None:
         """Atualiza primeiro a origem e depois conclui a linha na CONTAORDEM."""
-        if not str(doc_id or "").strip():
-            raise ValueError("DOC. SOMA vazio não pode ser gravado")
+        doc_id = str(doc_id or "").strip()
+        if not re.fullmatch(r"\d{7}", doc_id):
+            raise ValueError("DOC. SOMA deve conter exatamente 7 dígitos numéricos")
         if not processo or not id_interno:
             raise ValueError("PROCESSO e ID_INTERNO são obrigatórios para atualizar a origem")
-        self._update_origin_doc(processo, id_interno, str(doc_id).strip())
-
         headers = self.get_headers()
         header_map = {h.strip(): i + 1 for i, h in enumerate(headers)}
+        missing_columns = [name for name in ("DOC. SOMA", "LINK") if name not in header_map]
+        if missing_columns:
+            raise ValueError(
+                "Coluna(s) obrigatória(s) ausente(s) na CONTAORDEM: "
+                + ", ".join(missing_columns)
+            )
+
+        self._update_origin_doc(processo, id_interno, doc_id)
         
         now_str = time.strftime("%d/%m/%Y %H:%M:%S")
+        soma_url = (
+            "https://verbodavida.info/IVV/"
+            f"?mod=ivv&exec=entradas_saidas_dados&ID={doc_id}"
+        )
+        link_formula = f'=HYPERLINK("{soma_url}";"ACESSAR SOMA")'
         cells_to_update = [
             ("DOC. SOMA", doc_id),
+            ("LINK", link_formula),
             ("STATUS", "VALIDADO"),
             ("AUDITORIA", "Confirmado"),
             ("IDUSER", self.settings.user_job_id),
@@ -201,7 +214,10 @@ class GoogleSheetsService:
         if data_to_batch:
             for attempt in range(5):
                 try:
-                    self._ws.batch_update(data_to_batch)
+                    self._ws.batch_update(
+                        data_to_batch,
+                        value_input_option=ValueInputOption.user_entered,
+                    )
                     logger.info(f"Linha {row_idx} atualizada na sheet com DOC {doc_id}.")
                     break
                 except Exception as e:
