@@ -16,6 +16,8 @@ def valid_row(**overrides):
         "centro_custo": "CENTRO",
         "forma_pagamento": "DINHEIRO",
         "caixa": "CAIXA",
+        "processo": "T_EXTRATO",
+        "id_interno": "EXT001",
     }
     values.update(overrides)
     return ContaOrdemRow(**values)
@@ -34,6 +36,11 @@ def test_amount_must_be_greater_than_zero():
     for amount in ("0", "0,00", "-1,00", "texto"):
         error = DirectOrchestrator._validate_launch_row(valid_row(importancia=amount))
         assert error == f"IMPORTÂNCIA inválida: '{amount}'"
+
+
+def test_origin_identification_is_required():
+    error = DirectOrchestrator._validate_launch_row(valid_row(processo="", id_interno=""))
+    assert error == "Campos obrigatórios ausentes: PROCESSO, ID_INTERNO"
 
 
 def test_all_required_fields_are_reported_together():

@@ -22,6 +22,19 @@ from domain.models import (
 
 logger = logging.getLogger("soma_direct.sheets")
 
+SOURCE_SHEETS = {
+    norm_basic("T_EXTRATO"): "T_EXTRATO",
+    norm_basic("DÍZIMOS/OFERTAS"): "DÍZIMOS/OFERTAS",
+    norm_basic("SAÍDAS"): "SAÍDAS",
+    norm_basic("Financeiro"): "Financeiro",
+    norm_basic("VC_VENDAS"): "VC_VENDAS",
+}
+EXTERNAL_SOURCE_SHEETS = {"Financeiro", "VC_VENDAS"}
+EXTERNAL_SOURCE_SPREADSHEET_URL = (
+    "https://docs.google.com/spreadsheets/d/"
+    "11sUHhTzKaV21uX_FpBOEnJxNpFjUn6EHEiU79Pe3jXU/edit"
+)
+
 
 class GoogleSheetsService:
     """Cliente Google Sheets resiliente com batch update e retry para cota 429."""
@@ -106,8 +119,64 @@ class GoogleSheetsService:
                 else:
                     raise
 
-    def mark_row_completed(self, row_idx: int, doc_id: str, dados_doc: str = "", elapsed_ms: int = 0) -> None:
-        """Atualiza a linha com DOC. SOMA, STATUS, TIMESTAMP e DADOS DOC."""
+    def _update_origin_doc(self, processo: str, id_interno: str, doc_id: str) -> None:
+        """Atualiza DOC. SOMA na única linha da origem identificada por ID_INTERNO."""
+        source_name = SOURCE_SHEETS.get(norm_basic(processo))
+        if not source_name:
+            raise ValueError(f"PROCESSO sem planilha de origem configurada: '{processo}'")
+
+        spreadsheet = self._sh
+        if source_name in EXTERNAL_SOURCE_SHEETS:
+            spreadsheet = self._gc.open_by_url(EXTERNAL_SOURCE_SPREADSHEET_URL)
+        worksheet = spreadsheet.worksheet(source_name)
+        values = worksheet.get_all_values()
+        if not values:
+            raise ValueError(f"Planilha de origem '{source_name}' está vazia")
+
+        header_map = {norm_basic(h).replace("_", " "): i for i, h in enumerate(values[0])}
+        id_col = header_map.get(norm_basic("ID_INTERNO").replace("_", " "))
+        doc_col = header_map.get(norm_basic("DOC. SOMA"))
+        if id_col is None or doc_col is None:
+            raise ValueError(
+                f"Origem '{source_name}' precisa das colunas ID_INTERNO e DOC. SOMA"
+            )
+
+        matches = []
+        for row_number, row in enumerate(values[1:], start=2):
+            value = str(row[id_col]).strip() if id_col < len(row) else ""
+            if value == str(id_interno).strip():
+                matches.append((row_number, row))
+        if len(matches) != 1:
+            raise ValueError(
+                f"ID_INTERNO '{id_interno}' encontrado {len(matches)} vez(es) na origem '{source_name}'"
+            )
+
+        row_number, source_row = matches[0]
+        current_doc = str(source_row[doc_col]).strip() if doc_col < len(source_row) else ""
+        if current_doc != str(doc_id).strip():
+            cell = f"{self._col_letter(doc_col + 1)}{row_number}"
+            worksheet.update(cell, [[doc_id]])
+        logger.info(
+            "DOC %s confirmado na origem %s, linha %s, ID_INTERNO %s.",
+            doc_id, source_name, row_number, id_interno,
+        )
+
+    def mark_row_completed(
+        self,
+        row_idx: int,
+        doc_id: str,
+        dados_doc: str = "",
+        elapsed_ms: int = 0,
+        processo: str = "",
+        id_interno: str = "",
+    ) -> None:
+        """Atualiza primeiro a origem e depois conclui a linha na CONTAORDEM."""
+        if not str(doc_id or "").strip():
+            raise ValueError("DOC. SOMA vazio não pode ser gravado")
+        if not processo or not id_interno:
+            raise ValueError("PROCESSO e ID_INTERNO são obrigatórios para atualizar a origem")
+        self._update_origin_doc(processo, id_interno, str(doc_id).strip())
+
         headers = self.get_headers()
         header_map = {h.strip(): i + 1 for i, h in enumerate(headers)}
         

@@ -171,6 +171,7 @@ class ContaOrdemRow:
     caixa: str = ""
     caixa_saida: str = ""
     id_interno: str = ""
+    processo: str = ""
     status: str = ""
     dados_doc: str = ""
     auditoria: str = ""
@@ -208,6 +209,7 @@ class ContaOrdemRow:
             caixa=str(raw.get("CAIXA") or raw.get("caixa") or "").strip(),
             caixa_saida=str(raw.get("CAIXA SAIDA") or raw.get("caixa_saida") or "").strip(),
             id_interno=str(raw.get("ID_INTERNO") or raw.get("id_interno") or "").strip(),
+            processo=str(raw.get("PROCESSO") or raw.get("processo") or "").strip(),
             status=str(raw.get("STATUS") or raw.get("status") or "").strip(),
             dados_doc=str(raw.get("DADOS DOC") or raw.get("dados_doc") or "").strip(),
             auditoria=str(raw.get("AUDITORIA") or raw.get("auditoria") or "").strip(),

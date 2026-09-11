@@ -95,6 +95,8 @@ class DirectOrchestrator:
             "DESCRIÇÃO SOMA": row.descricao_soma,
             "CAIXA": row.caixa,
             "FORMA DE PAGAMENTO": row.forma_pagamento,
+            "PROCESSO": row.processo,
+            "ID_INTERNO": row.id_interno,
         }
         missing = [name for name, value in required.items() if not str(value or "").strip()]
         if missing:
@@ -179,7 +181,9 @@ class DirectOrchestrator:
                 row_idx=row.row_number,
                 doc_id=existing_doc,
                 dados_doc=dados_doc or f"Documento recuperado do SOMA ({existing_doc})",
-                elapsed_ms=0
+                elapsed_ms=0,
+                processo=row.processo,
+                id_interno=row.id_interno,
             )
             return OperationOutcome(
                 success=True,
@@ -211,7 +215,9 @@ class DirectOrchestrator:
                 row_idx=row.row_number,
                 doc_id=outcome.doc_id,
                 dados_doc=outcome.dados_doc,
-                elapsed_ms=outcome.elapsed_ms
+                elapsed_ms=outcome.elapsed_ms,
+                processo=row.processo,
+                id_interno=row.id_interno,
             )
         else:
             logger.error(f"-> ERRO Linha {row.row_number}: {outcome.error_message}")
