@@ -28,6 +28,7 @@ ENV/
 # Environment Variables & Credentials
 .env
 *.json
+credentials/*.json
 !credentials.template.json
 
 # Logs & Diagnostics

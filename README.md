@@ -32,28 +32,75 @@ Projeto moderno, desacoplado e de alta performance para automação e integraç�
 
 > **Aceleração**: Redução de tempo de **95%** (**~20x** no lote e até **~40x** por item individual). Zero falhas de layout ou timeouts de interface.
 
-## Execução
+## Ambiente e execução
+
+O projeto usa o seu próprio ambiente gerido pelo `uv`. O ficheiro `.env` deve
+ficar na raiz do projeto; ele é carregado de forma explícita e não é procurado no
+diretório corrente nem em projetos vizinhos. Caminhos relativos configurados no
+`.env` também são relativos à raiz do projeto.
+
+### Preparar
+
+```powershell
+cd <diretório-do-projeto>
+uv sync
+```
+
+Configure as credenciais sem as adicionar ao Git:
+
+```env
+GOOGLE_CREDENTIALS_PATH=credentials/sheets-service-account.json
+```
+
+Um caminho absoluto fornecido explicitamente também é suportado.
+
+### Aplicação principal
+
+```powershell
+uv run soma-direct
+```
+
+### Reconciliação segura
+
+```powershell
+uv run soma-reconcile
+```
+
+Sem `--apply`, a reconciliação é sempre executada em **dry-run**: o plano é
+calculado, mas nenhuma alteração é gravada. Para aplicar deliberadamente:
+
+```powershell
+uv run soma-reconcile --apply
+```
+
+Também é possível executar a CLI como módulo:
+
+```powershell
+uv run python -m workflows.reconciliation_cli
+```
+
+## Execução legada
 
 ```bash
 # Executar as linhas padrão ou lote
-python main.py
+uv run python main.py
 
 # Ou especificar linhas pontuais
-python main.py 4248 4246 4247
+uv run python main.py 4248 4246 4247
 ```
 ## Ronda completa por intervalo
 
 Execute sem parâmetros para informar o intervalo e o modo interativamente:
 
 ```powershell
-.\.venv\Scripts\python.exe .\ronda_completa.py
+uv run python ronda_completa.py
 ```
 
 Também é possível executar sem perguntas:
 
 ```powershell
-.\.venv\Scripts\python.exe .\ronda_completa.py --inicio 01/08/2026 --fim 31/08/2026 --simulation
-.\.venv\Scripts\python.exe .\ronda_completa.py --inicio 01/08/2026 --fim 31/08/2026 --apply
+uv run python ronda_completa.py --inicio 01/08/2026 --fim 31/08/2026 --simulation
+uv run python ronda_completa.py --inicio 01/08/2026 --fim 31/08/2026 --apply
 ```
 
 O modo de simulação é somente leitura. O modo de aplicação grava `Confirmado`

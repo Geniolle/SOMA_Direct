@@ -5,8 +5,9 @@ import time
 import calendar
 from datetime import datetime
 from collections import defaultdict, Counter
+from pathlib import Path
 
-sys.path.insert(0, r"C:\workspace\SOMA_Direct")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.settings import Settings
 from core.http_session import ResilientSession
 from core.auth import SomaAuthenticator

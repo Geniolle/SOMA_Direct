@@ -2,19 +2,13 @@ import argparse
 import logging
 import sys
 import time
-from pathlib import Path
-
-# Adiciona diretório raiz ao sys.path
-base_dir = Path(__file__).resolve().parent
-if str(base_dir) not in sys.path:
-    sys.path.insert(0, str(base_dir))
 
 from workflows.orchestrator import DirectOrchestrator
-from config.settings import Settings
+from config.paths import PROJECT_ROOT
 
 
 def setup_logging():
-    log_dir = base_dir / "logs"
+    log_dir = PROJECT_ROOT / "logs"
     log_dir.mkdir(exist_ok=True)
     today_str = time.strftime("%Y%m%d")
     log_file = log_dir / f"soma_direct_{today_str}.log"

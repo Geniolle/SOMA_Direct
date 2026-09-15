@@ -5,6 +5,7 @@ import re
 import time
 import uuid
 from collections import defaultdict
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import gspread
@@ -41,6 +42,12 @@ class GoogleSheetsService:
 
     def __init__(self, settings: Settings):
         self.settings = settings
+        credentials_path = Path(settings.google_credentials_path)
+        if not credentials_path.is_file():
+            raise FileNotFoundError(
+                "Credenciais Google não encontradas em "
+                f"'{credentials_path}'. Configure GOOGLE_CREDENTIALS_PATH no .env da raiz."
+            )
         self._gc = gspread.service_account(filename=settings.google_credentials_path)
         self._sh = self._open_with_retry(settings.spreadsheet_url)
         self._ws = self._sh.worksheet(settings.sheet_contaordem)

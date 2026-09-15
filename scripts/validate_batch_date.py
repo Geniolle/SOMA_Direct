@@ -2,10 +2,11 @@ import sys
 import os
 import json
 import re
+from pathlib import Path
 from typing import List, Dict, Any, Tuple
 from collections import defaultdict
 
-sys.path.insert(0, r"C:\workspace\SOMA_Direct")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.settings import Settings
 from core.http_session import ResilientSession
 from core.auth import SomaAuthenticator

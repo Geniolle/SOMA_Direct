@@ -2740,7 +2740,7 @@ def main():
     creds_path = (
         args.credentials or
         os.getenv("GOOGLE_CREDENTIALS_PATH") or
-        "C:/workspace/Tesouraria-SOMA/credentials/sheets-service-account.json"
+        "credentials/sheets-service-account.json"
     )
     spread_url = (
         args.spreadsheet_url or
@@ -2836,4 +2836,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

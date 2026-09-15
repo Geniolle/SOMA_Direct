@@ -18,8 +18,16 @@ dependencies = [
 
 [project.scripts]
 soma-direct = "main:main"
+soma-reconcile = "workflows.reconciliation_cli:main"
+
+[tool.setuptools]
+py-modules = ["main"]
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["core*", "config*", "domain*", "services*", "workflows*"]
 
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]

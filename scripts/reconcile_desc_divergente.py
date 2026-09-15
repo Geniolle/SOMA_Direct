@@ -8,7 +8,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-root = Path("C:/workspace/SOMA_Direct")
+root = Path(__file__).resolve().parents[1]
 if str(root) not in sys.path:
     sys.path.insert(0, str(root))
 
