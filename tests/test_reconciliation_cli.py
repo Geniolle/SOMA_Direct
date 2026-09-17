@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import subprocess
+import sys
+
+from config.paths import PROJECT_ROOT
 from workflows import reconciliation_cli
 from workflows.reconciliation_orchestrator import ReconciliationOrchestrator
 
@@ -20,6 +24,23 @@ class FakeOrchestrator:
 
 def test_orchestrator_import_is_public():
     assert ReconciliationOrchestrator.__name__ == "ReconciliationOrchestrator"
+
+
+def test_orchestrator_supports_legacy_direct_file_execution(tmp_path):
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(PROJECT_ROOT / "workflows" / "reconciliation_orchestrator.py"),
+            "--help",
+        ],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "--apply" in result.stdout
 
 
 def test_cli_defaults_to_dry_run(monkeypatch):

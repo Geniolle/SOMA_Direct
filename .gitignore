@@ -30,6 +30,7 @@ ENV/
 *.json
 credentials/*.json
 !credentials.template.json
+!.vscode/settings.json
 
 # Logs & Diagnostics
 logs/

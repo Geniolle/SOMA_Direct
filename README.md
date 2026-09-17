@@ -46,6 +46,10 @@ cd <diretório-do-projeto>
 uv sync
 ```
 
+No VS Code, abra a pasta `SOMA_Direct` como raiz do workspace. A configuração
+versionada seleciona automaticamente a `.venv` deste projeto ao executar um
+ficheiro Python, sem reutilizar ambientes de projetos vizinhos.
+
 Configure as credenciais sem as adicionar ao Git:
 
 ```env

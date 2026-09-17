@@ -1,10 +1,19 @@
 from __future__ import annotations
 
 import logging
+import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+# Compatibilidade pontual com a invocação legada por caminho de ficheiro.
+# Entrypoints e imports normais usam exclusivamente o packaging do projeto.
+if __package__ in (None, ""):
+    project_root = Path(__file__).resolve().parents[1]
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
 
 from config.settings import Settings
 from core.auth import SomaAuthenticator
@@ -499,3 +508,9 @@ class ReconciliationOrchestrator:
 
         self.apply_plan(plan)
         return plan
+
+
+if __name__ == "__main__":
+    from workflows.reconciliation_cli import main
+
+    raise SystemExit(main())
