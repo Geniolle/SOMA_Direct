@@ -233,6 +233,40 @@ class GoogleSheetsService:
                     else:
                         raise
 
+    def backfill_missing_links(self) -> int:
+        """Preenche a coluna LINK com a formula de acesso ao SOMA para linhas com DOC numerico de 7 digitos."""
+        rows = self._ws.get_all_values(value_render_option=ValueRenderOption.formula)
+        if not rows:
+            return 0
+        header_map = {norm_basic(value): index for index, value in enumerate(rows[0])}
+        doc_col = header_map.get(norm_basic("DOC. SOMA"))
+        link_col = header_map.get(norm_basic("LINK"))
+        if doc_col is None or link_col is None:
+            return 0
+
+        base_url = "https://verbodavida.info/IVV/?mod=ivv&exec=entradas_saidas_dados&ID="
+        updates = []
+        for row_number, row in enumerate(rows[1:], start=2):
+            doc_id = str(row[doc_col]).strip() if doc_col < len(row) else ""
+            if not re.fullmatch(r"\d{7}", doc_id):
+                continue
+            formula = f'=HYPERLINK("{base_url}{doc_id}";"ACESSAR SOMA")'
+            current = str(row[link_col]).strip() if link_col < len(row) else ""
+            if current != formula:
+                updates.append({
+                    "range": f"{self._col_letter(link_col + 1)}{row_number}",
+                    "values": [[formula]],
+                })
+
+        if updates:
+            for start in range(0, len(updates), 500):
+                self._ws.batch_update(
+                    updates[start : start + 500],
+                    value_input_option=ValueInputOption.user_entered,
+                )
+            logger.info("Backfill automatico de links: %d links preenchidos.", len(updates))
+        return len(updates)
+
     def claim_row(self, row_idx: int) -> Optional[str]:
         """Tenta reservar uma linha e confirma que este processo venceu a disputa."""
         headers = self.get_headers()

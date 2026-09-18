@@ -48,6 +48,12 @@ def run_cycle(orchestrator: DirectOrchestrator, run_maintenance: bool = False) -
             logging.info(f"[CICLO AGENDADO] Concluído: {len(outcomes)} itens processados ({sucessos} sucesso, {falhas} falha).")
         else:
             logging.info("[CICLO AGENDADO] Nenhuma linha pendente para processamento no momento.")
+
+        sheets = getattr(orchestrator, "sheets", None)
+        backfill_fn = getattr(sheets, "backfill_missing_links", None)
+        if callable(backfill_fn):
+            backfill_fn()
+
         if run_maintenance:
             stats = orchestrator.reconcile_scheduled_descriptions()
             logging.info("[MANUTENÇÃO AGENDADA] Resultado: %s", stats)
