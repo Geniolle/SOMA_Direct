@@ -278,7 +278,26 @@ class DirectOrchestrator:
 
         total_ms = int((time.perf_counter() - overall_t0) * 1000)
         logger.info(f"=== BATCH PENDENTES FINALIZADO: {len(outcomes)} linhas em {total_ms/1000:.2f}s ===")
+
+        if pending and not dry_run:
+            self.run_post_processes()
+
         return outcomes
+
+    def run_post_processes(self) -> None:
+        """Passos (6) Caixas/Bancos e (7) SOMA, portados do processo legado.
+        Controlados por settings.run_caixas_bancos / settings.run_soma_sheet
+        (ambos False por padrão até serem validados em produção)."""
+        from workflows.post_processes import run_post_processes
+
+        if not (self.settings.run_caixas_bancos or self.settings.run_soma_sheet):
+            return
+
+        run_post_processes(
+            self,
+            run_caixas_bancos=self.settings.run_caixas_bancos,
+            run_soma_sheet=self.settings.run_soma_sheet,
+        )
 
     def audit_target_rows(self, row_indices: List[int], dry_run: bool = False) -> List[AuditOutcome]:
         """Audita uma lista de linhas especificadas."""

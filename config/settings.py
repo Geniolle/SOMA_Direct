@@ -32,7 +32,12 @@ class Settings:
     verify_tls: bool = True
     claim_stale_seconds: int = 900
     reconciliation_interval_seconds: int = 3600
-    
+
+    # Pós-processos (portados do legado C:\workspace\SOMA): saldos de Caixas/Bancos
+    # e relatório da sheet SOMA. Default False até serem validados em produção.
+    run_caixas_bancos: bool = False
+    run_soma_sheet: bool = False
+
     @classmethod
     def from_env(cls, env_path: Optional[str | Path] = None) -> "Settings":
         resolved_env_path = (
@@ -64,4 +69,6 @@ class Settings:
             verify_tls=os.getenv("VERIFY_TLS", "true").strip().lower() not in ("0", "false", "no"),
             claim_stale_seconds=int(os.getenv("CLAIM_STALE_SECONDS", "900") or 900),
             reconciliation_interval_seconds=int(os.getenv("RECONCILIATION_INTERVAL_SECONDS", "3600") or 3600),
+            run_caixas_bancos=os.getenv("RUN_CAIXAS_BANCOS", "false").strip().lower() in ("1", "true", "yes"),
+            run_soma_sheet=os.getenv("RUN_SOMA_SHEET", "false").strip().lower() in ("1", "true", "yes"),
         )

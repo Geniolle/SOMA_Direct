@@ -17,6 +17,7 @@ from domain.models import (
     TipoMovimento,
     is_entrada_ou_saida,
     norm_basic,
+    normalize_document_value,
     strip_date_prefix,
     strip_suffix_n,
 )
@@ -35,6 +36,46 @@ EXTERNAL_SOURCE_SPREADSHEET_URL = (
     "https://docs.google.com/spreadsheets/d/"
     "11sUHhTzKaV21uX_FpBOEnJxNpFjUn6EHEiU79Pe3jXU/edit"
 )
+
+# O rótulo do card no site nem sempre bate com o nome da coluna na sheet
+# GERENCIAR CAIXAS (ex.: o site chama de "CAIXA ECONÓMICA MONTEPIO GERAL - CC",
+# a sheet usa historicamente "CAIXA BANCO" para essa mesma conta).
+CAIXAS_LABEL_ALIASES = {
+    norm_basic("CAIXA ECONÓMICA MONTEPIO GERAL - CC"): "CAIXA BANCO",
+}
+
+# Colunas obrigatórias da sheet SOMA e o atributo correspondente em SomaSearchResult.
+SOMA_REPORT_COLUMNS = {
+    "CODIGO": "codigo",
+    "TIPO": "tipo",
+    "DESCRIÇÃO": "descricao",
+    "VALOR": "valor",
+    "PAGAMENTO": "data",
+    "STATUS": "status",
+    "BAIXA": "baixa",
+}
+
+
+def _find_safe_start_row(values: List[List[str]], code_col: int, target_cols: List[int]) -> int:
+    """Acha a primeira linha realmente livre para escrever, sem sobrescrever
+    dados existentes caso haja um "buraco" seguido de linhas já preenchidas."""
+    first_blank_row: Optional[int] = None
+    for row_idx, row in enumerate(values[1:], start=2):
+        blank = all(len(row) <= c or not str(row[c]).strip() for c in target_cols)
+        if blank:
+            first_blank_row = row_idx
+            break
+
+    if first_blank_row is None:
+        return len(values) + 1
+
+    for row_idx, row in enumerate(values[1:], start=2):
+        if row_idx <= first_blank_row:
+            continue
+        if len(row) > code_col and str(row[code_col]).strip():
+            return len(values) + 1
+
+    return first_blank_row
 
 
 class GoogleSheetsService:
@@ -167,6 +208,114 @@ class GoogleSheetsService:
             "DOC %s confirmado na origem %s, linha %s, ID_INTERNO %s.",
             doc_id, source_name, row_number, id_interno,
         )
+
+    def update_caixas_bancos(self, saldos: Dict[str, str]) -> int:
+        """Grava os saldos atuais de Caixas/Bancos na linha 2 da sheet GERENCIAR CAIXAS.
+        Só escreve em colunas que já existem na sheet (mesma regra do processo legado)."""
+        ws = self._sh.worksheet(self.settings.sheet_caixas)
+        headers = ws.row_values(1)
+        header_map = {norm_basic(h): i + 1 for i, h in enumerate(headers)}
+
+        updates = []
+        unmatched = []
+        for label, valor in saldos.items():
+            col_name = CAIXAS_LABEL_ALIASES.get(norm_basic(label), label)
+            col = header_map.get(norm_basic(col_name))
+            if col is None:
+                unmatched.append(label)
+                continue
+            updates.append({"range": f"{self._col_letter(col)}2", "values": [[valor]]})
+
+        ts_col = header_map.get(norm_basic("TIMESTAMP"))
+        if ts_col:
+            updates.append({
+                "range": f"{self._col_letter(ts_col)}2",
+                "values": [[time.strftime("%d/%m/%Y %H:%M:%S")]],
+            })
+
+        if unmatched:
+            logger.warning(
+                "Saldo(s) de Caixas/Bancos sem coluna correspondente em '%s': %s",
+                self.settings.sheet_caixas, ", ".join(unmatched),
+            )
+
+        if not updates:
+            return 0
+
+        for attempt in range(5):
+            try:
+                ws.batch_update(updates, value_input_option=ValueInputOption.user_entered)
+                break
+            except Exception as e:
+                if "429" in str(e) and attempt < 4:
+                    time.sleep(15)
+                else:
+                    raise
+
+        logger.info("Sheet '%s' atualizada com %d saldo(s).", self.settings.sheet_caixas, len(updates))
+        return len(updates)
+
+    def append_soma_rows(self, items: List[Any]) -> int:
+        """Insere na sheet SOMA os lançamentos (SomaSearchResult) ainda não presentes
+        (por CODIGO), sem nunca sobrescrever uma linha já preenchida."""
+        ws = self._sh.worksheet(self.settings.sheet_soma)
+        values = ws.get_all_values()
+        if not values:
+            raise ValueError(f"Planilha '{self.settings.sheet_soma}' está vazia")
+
+        headers = values[0]
+        header_map = {norm_basic(h): i for i, h in enumerate(headers)}
+        missing = [name for name in SOMA_REPORT_COLUMNS if norm_basic(name) not in header_map]
+        if missing:
+            raise ValueError(
+                f"Coluna(s) obrigatória(s) ausente(s) na sheet '{self.settings.sheet_soma}': "
+                + ", ".join(missing)
+            )
+
+        code_col = header_map[norm_basic("CODIGO")]
+        existing_codes = {
+            normalize_document_value(row[code_col])
+            for row in values[1:]
+            if len(row) > code_col and str(row[code_col]).strip()
+        }
+
+        novos = [
+            item for item in items
+            if normalize_document_value(getattr(item, "codigo", "")) not in existing_codes
+        ]
+        if not novos:
+            return 0
+
+        target_cols = [header_map[norm_basic(name)] for name in SOMA_REPORT_COLUMNS]
+        start_row = _find_safe_start_row(values, code_col, target_cols)
+
+        last_row_needed = start_row + len(novos) - 1
+        if last_row_needed > ws.row_count:
+            ws.add_rows(last_row_needed - ws.row_count)
+
+        updates = []
+        for offset, item in enumerate(novos):
+            row_idx = start_row + offset
+            for col_name, attr in SOMA_REPORT_COLUMNS.items():
+                col_idx = header_map[norm_basic(col_name)]
+                value = getattr(item, attr, "")
+                updates.append({"range": f"{self._col_letter(col_idx + 1)}{row_idx}", "values": [[value]]})
+
+        for attempt in range(5):
+            try:
+                ws.batch_update(updates, value_input_option=ValueInputOption.user_entered)
+                break
+            except Exception as e:
+                if "429" in str(e) and attempt < 4:
+                    time.sleep(15)
+                else:
+                    raise
+
+        logger.info(
+            "Sheet '%s' atualizada: %d lançamento(s) novo(s) inseridos a partir da linha %d.",
+            self.settings.sheet_soma, len(novos), start_row,
+        )
+        return len(novos)
 
     def mark_row_completed(
         self,

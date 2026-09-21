@@ -125,6 +125,32 @@ class SomaApiService:
                 return v
         raise ValueError(f"Caixa não encontrado no SOMA: '{caixa_name}'")
 
+    def buscar_resumo_caixas(self) -> Dict[str, str]:
+        """Lê os saldos atuais de Caixas/Bancos via o mesmo endpoint que o dashboard
+        oficial usa (sys/post/buscarResumoCaixasNew.php, chamado por themes/js/caixas.js)."""
+        resp = self.http.post_ajax(
+            f"{self.base_url}sys/post/buscarResumoCaixasNew.php",
+            data={"id": self.settings.institution_id},
+        )
+        http_error = self._http_error(resp)
+        if http_error:
+            raise RuntimeError(f"Falha ao ler saldos de Caixas/Bancos: {http_error}")
+
+        saldos: Dict[str, str] = {}
+        for m in re.finditer(
+            r"counter-number-related[^>]*>([^<]*)<.*?counter-label[^>]*>\s*([^<]+?)\s*</div>",
+            resp.text,
+            re.DOTALL,
+        ):
+            valor = unescape(m.group(1)).strip()
+            label = unescape(re.sub(r"\s+", " ", m.group(2))).strip()
+            if label:
+                saldos[label] = valor
+
+        if not saldos:
+            raise RuntimeError("O SOMA devolveu um resumo de Caixas/Bancos vazio")
+        return saldos
+
     def _find_doc_id(self, tipo: str, descricao: str, valor: str, data_mov: str) -> Optional[str]:
         """Consulta buscarEntradasSaidas.php e retorna o CODIGO do documento estritamente correspondente."""
         search_payload = {
