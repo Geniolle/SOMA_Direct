@@ -17,7 +17,9 @@ class SomaAuthenticator:
         self.http = http_session
         self.is_authenticated = False
 
-    def login(self) -> bool:
+    def login(self, force: bool = False) -> bool:
+        if self.is_authenticated and not force:
+            return True
         if not self.settings.site_user or not self.settings.site_password:
             logger.error("SITE_USER e SITE_PASSWORD devem ser definidos no ambiente.")
             return False

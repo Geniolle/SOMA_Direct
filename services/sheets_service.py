@@ -21,6 +21,11 @@ from domain.models import (
     strip_date_prefix,
     strip_suffix_n,
 )
+from services.repasse_service import (
+    RepasseValidationRecord,
+    format_decimal_pt,
+    functional_key,
+)
 
 logger = logging.getLogger("soma_direct.sheets")
 
@@ -54,6 +59,26 @@ SOMA_REPORT_COLUMNS = {
     "STATUS": "status",
     "BAIXA": "baixa",
 }
+
+REPASSE_HEADERS = [
+    "ID_VALIDACAO",
+    "DATA_EXECUCAO",
+    "INSTITUICAO",
+    "ANO",
+    "MES",
+    "DATA_INICIO",
+    "DATA_FIM",
+    "PLANO_CONTA_REPASSE",
+    "VALOR_REPASSE",
+    "STATUS_REPASSE_SOMA",
+    "PLANO_CONTA_BALANCETE",
+    "VALOR_BALANCETE",
+    "DIFERENCA",
+    "RESULTADO_VALIDACAO",
+    "DIAGNOSTICO",
+    "MES_MATCH_ALTERNATIVO",
+    "OBSERVACAO",
+]
 
 
 def _find_safe_start_row(values: List[List[str]], code_col: int, target_cols: List[int]) -> int:
@@ -316,6 +341,130 @@ class GoogleSheetsService:
             self.settings.sheet_soma, len(novos), start_row,
         )
         return len(novos)
+
+    def get_repasse_existing_ids(self) -> Dict[str, str]:
+        """Lê a T_REPASSE e devolve ID_VALIDACAO por chave funcional estável."""
+        ws = self._sh.worksheet(self.settings.sheet_repasse)
+        values = ws.get_all_values()
+        if not values:
+            return {}
+        headers = [str(value).strip() for value in values[0]]
+        header_map = {norm_basic(header): index for index, header in enumerate(headers)}
+        required = [
+            "ID_VALIDACAO",
+            "INSTITUICAO",
+            "ANO",
+            "MES",
+            "PLANO_CONTA_REPASSE",
+        ]
+        if any(norm_basic(name) not in header_map for name in required):
+            return {}
+        out: Dict[str, str] = {}
+        for row in values[1:]:
+            def cell(name: str) -> str:
+                index = header_map[norm_basic(name)]
+                return str(row[index]).strip() if index < len(row) else ""
+
+            row_id = cell("ID_VALIDACAO")
+            if not row_id:
+                continue
+            try:
+                year = int(cell("ANO"))
+            except ValueError:
+                continue
+            key = functional_key(
+                cell("INSTITUICAO"),
+                year,
+                cell("MES"),
+                cell("PLANO_CONTA_REPASSE"),
+            )
+            out[key] = row_id
+        return out
+
+    def upsert_repasse_records(self, records: List[RepasseValidationRecord]) -> int:
+        """Cria/atualiza linhas na T_REPASSE sem duplicar a chave funcional."""
+        if not records:
+            return 0
+        ws = self._sh.worksheet(self.settings.sheet_repasse)
+        values = ws.get_all_values()
+        if not values:
+            ws.update("A1:Q1", [REPASSE_HEADERS])
+            values = [REPASSE_HEADERS]
+
+        headers = [str(value).strip() for value in values[0]]
+        if all(not header for header in headers):
+            ws.update("A1:Q1", [REPASSE_HEADERS])
+            headers = REPASSE_HEADERS
+            values = [REPASSE_HEADERS]
+
+        missing = [header for header in REPASSE_HEADERS if header not in headers]
+        if missing:
+            raise ValueError(
+                f"Coluna(s) obrigatória(s) ausente(s) na sheet '{self.settings.sheet_repasse}': "
+                + ", ".join(missing)
+            )
+        header_map = {header: index for index, header in enumerate(headers)}
+
+        existing_rows: Dict[str, int] = {}
+        for row_number, row in enumerate(values[1:], start=2):
+            try:
+                year = int(str(row[header_map["ANO"]]).strip())
+            except (ValueError, IndexError):
+                continue
+            def cell(name: str) -> str:
+                index = header_map[name]
+                return str(row[index]).strip() if index < len(row) else ""
+
+            key = functional_key(
+                cell("INSTITUICAO"),
+                year,
+                cell("MES"),
+                cell("PLANO_CONTA_REPASSE"),
+            )
+            existing_rows[key] = row_number
+
+        updates = []
+        next_row = len(values) + 1
+        for record in records:
+            row_number = existing_rows.get(record.chave_funcional)
+            if row_number is None:
+                row_number = next_row
+                next_row += 1
+                existing_rows[record.chave_funcional] = row_number
+            row_values = [
+                record.id_validacao,
+                record.data_execucao,
+                record.instituicao,
+                str(record.ano),
+                record.mes,
+                record.data_inicio,
+                record.data_fim,
+                record.plano_conta_repasse,
+                format_decimal_pt(record.valor_repasse),
+                record.status_repasse_soma,
+                record.plano_conta_balancete,
+                format_decimal_pt(record.valor_balancete),
+                format_decimal_pt(record.diferenca),
+                record.resultado_validacao,
+                record.diagnostico,
+                record.mes_match_alternativo,
+                record.observacao,
+            ]
+            updates.append({
+                "range": f"A{row_number}:Q{row_number}",
+                "values": [row_values],
+            })
+
+        for attempt in range(5):
+            try:
+                ws.batch_update(updates, value_input_option=ValueInputOption.user_entered)
+                break
+            except Exception as e:
+                if "429" in str(e) and attempt < 4:
+                    time.sleep(15)
+                else:
+                    raise
+        return len(updates)
 
     def mark_row_completed(
         self,

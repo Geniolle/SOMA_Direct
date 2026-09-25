@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sys
 from collections.abc import Sequence
+from pathlib import Path
+
+if __package__ in (None, ""):
+    project_root = Path(__file__).resolve().parents[1]
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
 
 from workflows.reconciliation_orchestrator import ReconciliationOrchestrator
 

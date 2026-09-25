@@ -25,6 +25,8 @@ class Settings:
     sheet_contaordem: str = "CONTAORDEM"
     sheet_caixas: str = "GERENCIAR CAIXAS"
     sheet_soma: str = "SOMA"
+    sheet_repasse: str = "T_REPASSE"
+    institution_name: str = "BRAGA - PORTUGAL"
     
     # Execução
     timeout_seconds: int = 25
@@ -64,6 +66,8 @@ class Settings:
             sheet_contaordem=os.getenv("SHEET_CONTAORDEM", "CONTAORDEM"),
             sheet_caixas=os.getenv("SHEET_CAIXAS", "GERENCIAR CAIXAS"),
             sheet_soma=os.getenv("SHEET_SOMA", "SOMA"),
+            sheet_repasse=os.getenv("SHEET_REPASSE", "T_REPASSE"),
+            institution_name=os.getenv("INSTITUTION_NAME", "BRAGA - PORTUGAL"),
             timeout_seconds=int(os.getenv("TIMEOUT_SECONDS", "25") or 25),
             user_job_id=os.getenv("IDUSER", "USERJOB") or "USERJOB",
             verify_tls=os.getenv("VERIFY_TLS", "true").strip().lower() not in ("0", "false", "no"),
