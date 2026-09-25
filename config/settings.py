@@ -27,6 +27,7 @@ class Settings:
     sheet_soma: str = "SOMA"
     sheet_repasse: str = "T_REPASSE"
     institution_name: str = "BRAGA - PORTUGAL"
+    app_verbo_cafe_spreadsheet_url: str = "https://docs.google.com/spreadsheets/d/11sUHhTzKaV21uX_FpBOEnJxNpFjUn6EHEiU79Pe3jXU/edit"
     
     # Execução
     timeout_seconds: int = 25
@@ -68,6 +69,10 @@ class Settings:
             sheet_soma=os.getenv("SHEET_SOMA", "SOMA"),
             sheet_repasse=os.getenv("SHEET_REPASSE", "T_REPASSE"),
             institution_name=os.getenv("INSTITUTION_NAME", "BRAGA - PORTUGAL"),
+            app_verbo_cafe_spreadsheet_url=os.getenv(
+                "APP_VERBO_CAFE_SPREADSHEET_URL",
+                "https://docs.google.com/spreadsheets/d/11sUHhTzKaV21uX_FpBOEnJxNpFjUn6EHEiU79Pe3jXU/edit",
+            ),
             timeout_seconds=int(os.getenv("TIMEOUT_SECONDS", "25") or 25),
             user_job_id=os.getenv("IDUSER", "USERJOB") or "USERJOB",
             verify_tls=os.getenv("VERIFY_TLS", "true").strip().lower() not in ("0", "false", "no"),

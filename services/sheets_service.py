@@ -5,6 +5,7 @@ import re
 import time
 import uuid
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -29,6 +30,41 @@ from services.repasse_service import (
 
 logger = logging.getLogger("soma_direct.sheets")
 
+@dataclass(frozen=True)
+class OriginConfig:
+    processo: str
+    sheet_name: str
+    spreadsheet_url: Optional[str] = None
+    id_column_name: str = "ID_INTERNO"
+    doc_column_name: str = "DOC. SOMA"
+
+
+EXTERNAL_SOURCE_SPREADSHEET_URL = (
+    "https://docs.google.com/spreadsheets/d/"
+    "11sUHhTzKaV21uX_FpBOEnJxNpFjUn6EHEiU79Pe3jXU/edit"
+)
+
+
+def build_default_origin_registry(
+    default_spreadsheet_url: Optional[str] = None,
+    app_verbo_cafe_url: Optional[str] = None,
+) -> Dict[str, OriginConfig]:
+    verbo_cafe_url = app_verbo_cafe_url or EXTERNAL_SOURCE_SPREADSHEET_URL
+    configs = [
+        OriginConfig(processo="T_EXTRATO", sheet_name="T_EXTRATO", spreadsheet_url=default_spreadsheet_url),
+        OriginConfig(processo="DÍZIMOS/OFERTAS", sheet_name="DÍZIMOS/OFERTAS", spreadsheet_url=default_spreadsheet_url),
+        OriginConfig(processo="SAÍDAS", sheet_name="SAÍDAS", spreadsheet_url=default_spreadsheet_url),
+        OriginConfig(processo="Financeiro", sheet_name="Financeiro", spreadsheet_url=verbo_cafe_url),
+        OriginConfig(processo="VC_VENDAS", sheet_name="VC_VENDAS", spreadsheet_url=verbo_cafe_url),
+    ]
+    registry: Dict[str, OriginConfig] = {}
+    for cfg in configs:
+        registry[norm_basic(cfg.processo)] = cfg
+    return registry
+
+
+DEFAULT_ORIGIN_REGISTRY = build_default_origin_registry()
+
 SOURCE_SHEETS = {
     norm_basic("T_EXTRATO"): "T_EXTRATO",
     norm_basic("DÍZIMOS/OFERTAS"): "DÍZIMOS/OFERTAS",
@@ -37,10 +73,11 @@ SOURCE_SHEETS = {
     norm_basic("VC_VENDAS"): "VC_VENDAS",
 }
 EXTERNAL_SOURCE_SHEETS = {"Financeiro", "VC_VENDAS"}
-EXTERNAL_SOURCE_SPREADSHEET_URL = (
-    "https://docs.google.com/spreadsheets/d/"
-    "11sUHhTzKaV21uX_FpBOEnJxNpFjUn6EHEiU79Pe3jXU/edit"
-)
+
+
+def _normalize_header(name: str) -> str:
+    cleaned = norm_basic(name).replace("_", " ").replace(".", " ")
+    return " ".join(cleaned.split())
 
 # O rótulo do card no site nem sempre bate com o nome da coluna na sheet
 # GERENCIAR CAIXAS (ex.: o site chama de "CAIXA ECONÓMICA MONTEPIO GERAL - CC",
@@ -106,7 +143,11 @@ def _find_safe_start_row(values: List[List[str]], code_col: int, target_cols: Li
 class GoogleSheetsService:
     """Cliente Google Sheets resiliente com batch update e retry para cota 429."""
 
-    def __init__(self, settings: Settings):
+    def __init__(
+        self,
+        settings: Settings,
+        origin_registry: Optional[Dict[str, OriginConfig]] = None,
+    ):
         self.settings = settings
         credentials_path = Path(settings.google_credentials_path)
         if not credentials_path.is_file():
@@ -115,9 +156,73 @@ class GoogleSheetsService:
                 f"'{credentials_path}'. Configure GOOGLE_CREDENTIALS_PATH no .env da raiz."
             )
         self._gc = gspread.service_account(filename=settings.google_credentials_path)
+        self._spreadsheet_cache: Dict[str, Any] = {}
         self._sh = self._open_with_retry(settings.spreadsheet_url)
+        self._spreadsheet_cache[settings.spreadsheet_url] = self._sh
         self._ws = self._sh.worksheet(settings.sheet_contaordem)
         self._headers_cache: Optional[List[str]] = None
+        self._origin_registry = origin_registry or build_default_origin_registry(
+            default_spreadsheet_url=settings.spreadsheet_url,
+            app_verbo_cafe_url=getattr(settings, "app_verbo_cafe_spreadsheet_url", None),
+        )
+
+    @property
+    def origin_registry(self) -> Dict[str, OriginConfig]:
+        if not hasattr(self, "_origin_registry") or self._origin_registry is None:
+            default_url = getattr(getattr(self, "settings", None), "spreadsheet_url", None)
+            verbo_url = getattr(getattr(self, "settings", None), "app_verbo_cafe_spreadsheet_url", None)
+            self._origin_registry = build_default_origin_registry(
+                default_spreadsheet_url=default_url,
+                app_verbo_cafe_url=verbo_url,
+            )
+        return self._origin_registry
+
+    @property
+    def spreadsheet_cache(self) -> Dict[str, Any]:
+        if not hasattr(self, "_spreadsheet_cache") or self._spreadsheet_cache is None:
+            self._spreadsheet_cache = {}
+            if hasattr(self, "_sh") and self._sh is not None:
+                default_url = getattr(getattr(self, "settings", None), "spreadsheet_url", None)
+                if default_url:
+                    self._spreadsheet_cache[default_url] = self._sh
+        return self._spreadsheet_cache
+
+    def register_spreadsheet(self, url: str, spreadsheet: Any) -> None:
+        """Registra manualmente um Spreadsheet no cache (útil para testes ou injeção de dependência)."""
+        self.spreadsheet_cache[url] = spreadsheet
+
+    def register_origin(self, config: OriginConfig) -> None:
+        """Registra ou sobrescreve uma configuração de origem."""
+        self.origin_registry[norm_basic(config.processo)] = config
+
+    def get_spreadsheet(self, spreadsheet_url: Optional[str] = None) -> Any:
+        """Obtém uma instância de Spreadsheet (com cache e retry), usando a planilha principal se url for None."""
+        if not spreadsheet_url:
+            return self._sh
+        default_url = getattr(getattr(self, "settings", None), "spreadsheet_url", None)
+        if default_url and spreadsheet_url == default_url:
+            return self._sh
+        if spreadsheet_url in self.spreadsheet_cache:
+            return self.spreadsheet_cache[spreadsheet_url]
+        if hasattr(self, "_gc") and hasattr(self._gc, "open_by_url"):
+            sh = self._open_with_retry(spreadsheet_url)
+        elif hasattr(self, "_sh"):
+            sh = self._sh
+        else:
+            raise RuntimeError(f"Não foi possível abrir o Spreadsheet '{spreadsheet_url}'")
+        self.spreadsheet_cache[spreadsheet_url] = sh
+        return sh
+
+    def get_origin_config(self, processo: str) -> OriginConfig:
+        key = norm_basic(processo)
+        if key not in self.origin_registry:
+            raise ValueError(f"PROCESSO sem planilha de origem configurada: '{processo}'")
+        return self.origin_registry[key]
+
+    def get_origin_worksheet(self, processo: str) -> Any:
+        cfg = self.get_origin_config(processo)
+        spreadsheet = self.get_spreadsheet(cfg.spreadsheet_url)
+        return spreadsheet.worksheet(cfg.sheet_name)
 
     def _open_with_retry(self, url: str, max_retries: int = 5) -> gspread.Spreadsheet:
         for i in range(max_retries):
@@ -192,26 +297,36 @@ class GoogleSheetsService:
                 else:
                     raise
 
+    @staticmethod
+    def _write_origin_cell(worksheet: Any, cell: str, value: str, max_retries: int = 5) -> None:
+        """Atualiza uma célula na origem de forma compatível com gspread 5 e 6 com retry para cota 429."""
+        for attempt in range(max_retries):
+            try:
+                try:
+                    worksheet.update(cell, [[value]])
+                except TypeError:
+                    worksheet.update(range_name=cell, values=[[value]])
+                return
+            except Exception as e:
+                if "429" in str(e) and attempt < max_retries - 1:
+                    time.sleep(15)
+                else:
+                    raise
+
     def _update_origin_doc(self, processo: str, id_interno: str, doc_id: str) -> None:
         """Atualiza DOC. SOMA na única linha da origem identificada por ID_INTERNO."""
-        source_name = SOURCE_SHEETS.get(norm_basic(processo))
-        if not source_name:
-            raise ValueError(f"PROCESSO sem planilha de origem configurada: '{processo}'")
-
-        spreadsheet = self._sh
-        if source_name in EXTERNAL_SOURCE_SHEETS:
-            spreadsheet = self._gc.open_by_url(EXTERNAL_SOURCE_SPREADSHEET_URL)
-        worksheet = spreadsheet.worksheet(source_name)
+        cfg = self.get_origin_config(processo)
+        worksheet = self.get_origin_worksheet(processo)
         values = worksheet.get_all_values()
         if not values:
-            raise ValueError(f"Planilha de origem '{source_name}' está vazia")
+            raise ValueError(f"Planilha de origem '{cfg.sheet_name}' está vazia")
 
-        header_map = {norm_basic(h).replace("_", " "): i for i, h in enumerate(values[0])}
-        id_col = header_map.get(norm_basic("ID_INTERNO").replace("_", " "))
-        doc_col = header_map.get(norm_basic("DOC. SOMA"))
+        header_map = {_normalize_header(h): i for i, h in enumerate(values[0])}
+        id_col = header_map.get(_normalize_header(cfg.id_column_name))
+        doc_col = header_map.get(_normalize_header(cfg.doc_column_name))
         if id_col is None or doc_col is None:
             raise ValueError(
-                f"Origem '{source_name}' precisa das colunas ID_INTERNO e DOC. SOMA"
+                f"Origem '{cfg.sheet_name}' precisa das colunas {cfg.id_column_name} e {cfg.doc_column_name}"
             )
 
         matches = []
@@ -221,17 +336,17 @@ class GoogleSheetsService:
                 matches.append((row_number, row))
         if len(matches) != 1:
             raise ValueError(
-                f"ID_INTERNO '{id_interno}' encontrado {len(matches)} vez(es) na origem '{source_name}'"
+                f"ID_INTERNO '{id_interno}' encontrado {len(matches)} vez(es) na origem '{cfg.sheet_name}'"
             )
 
         row_number, source_row = matches[0]
         current_doc = str(source_row[doc_col]).strip() if doc_col < len(source_row) else ""
         if current_doc != str(doc_id).strip():
             cell = f"{self._col_letter(doc_col + 1)}{row_number}"
-            worksheet.update(cell, [[doc_id]])
+            self._write_origin_cell(worksheet, cell, str(doc_id).strip())
         logger.info(
             "DOC %s confirmado na origem %s, linha %s, ID_INTERNO %s.",
-            doc_id, source_name, row_number, id_interno,
+            doc_id, cfg.sheet_name, row_number, id_interno,
         )
 
     def update_caixas_bancos(self, saldos: Dict[str, str]) -> int:
@@ -480,6 +595,14 @@ class GoogleSheetsService:
         if not re.fullmatch(r"\d{7}", doc_id):
             raise ValueError("DOC. SOMA deve conter exatamente 7 dígitos numéricos")
         if not processo or not id_interno:
+            try:
+                row_data = self.get_row(row_idx)
+                if row_data:
+                    processo = processo or row_data.processo
+                    id_interno = id_interno or row_data.id_interno
+            except Exception:
+                pass
+        if not processo or not id_interno:
             raise ValueError("PROCESSO e ID_INTERNO são obrigatórios para atualizar a origem")
         headers = self.get_headers()
         header_map = {h.strip(): i + 1 for i, h in enumerate(headers)}
@@ -530,6 +653,25 @@ class GoogleSheetsService:
                         time.sleep(15)
                     else:
                         raise
+
+    def sync_contaordem_row_to_origin(self, row_idx: int) -> bool:
+        """Lê a linha da CONTAORDEM e sincroniza o DOC. SOMA de volta para a origem configurada."""
+        row_data = self.get_row(row_idx)
+        if not row_data:
+            raise ValueError(f"Linha {row_idx} não encontrada na CONTAORDEM")
+        doc_id = str(row_data.doc_soma or "").strip()
+        if not re.fullmatch(r"\d{7}", doc_id):
+            logger.warning(
+                "Linha %s ignorada para sincronização na origem: DOC. SOMA inválido ('%s')",
+                row_idx, doc_id,
+            )
+            return False
+        if not row_data.processo or not row_data.id_interno:
+            raise ValueError(
+                f"Linha {row_idx} não possui PROCESSO ou ID_INTERNO para localizar a origem"
+            )
+        self._update_origin_doc(row_data.processo, row_data.id_interno, doc_id)
+        return True
 
     def backfill_missing_links(self) -> int:
         """Preenche a coluna LINK com a formula de acesso ao SOMA para linhas com DOC numerico de 7 digitos."""

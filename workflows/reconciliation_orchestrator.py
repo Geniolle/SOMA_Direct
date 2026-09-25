@@ -140,6 +140,11 @@ class ReconciliationOrchestrator:
         self._initialized = False
 
     def _get_source_worksheet(self, source_name: str) -> Any:
+        if hasattr(self.sheets, "get_origin_worksheet"):
+            try:
+                return self.sheets.get_origin_worksheet(source_name)
+            except Exception:
+                pass
         if source_name not in EXTERNAL_SOURCE_SHEETS:
             return self.sheets._sh.worksheet(source_name)
         if self._external_source_spreadsheet is None:
