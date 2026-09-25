@@ -181,8 +181,23 @@ def main() -> int:
         id_int = row[id_idx] if id_idx < len(row) else ""
         proc = row[proc_idx] if proc_idx < len(row) else ""
 
-        # Registos sem DOC numérico (transferências, etc.)
+        # Registos sem DOC numérico (transferências vs pendentes)
         if not doc or not doc.isdigit():
+            is_transf = (
+                "transf" in norm_basic(tipo)
+                or "transf" in norm_basic(proc)
+                or "cartao" in norm_basic(tipo)
+                or "cartao" in norm_basic(proc)
+                or "mvv" in norm_basic(tipo)
+                or "mvv" in norm_basic(proc)
+            )
+            if is_transf or not id_int:
+                st = ""
+                det = "Transferência ou documento não aplicável"
+            else:
+                st = "esperando atualizar"
+                det = "Lançamento pendente de atualização no SOMA"
+
             results.append(ValidationRowResult(
                 row_number=r_num,
                 id_interno=id_int,
@@ -192,10 +207,10 @@ def main() -> int:
                 importancia=val,
                 descricao_soma=desc,
                 tipo=tipo,
-                status="",
-                details="Transferência ou documento não aplicável",
+                status=st,
+                details=det,
             ))
-            output_cells.append([""])
+            output_cells.append([st])
             continue
 
         errors: List[str] = []
@@ -270,6 +285,7 @@ def main() -> int:
     # Estatísticas
     counts = Counter(r.status for r in results)
     total_validados = sum(1 for r in results if r.status == "Validado")
+    total_esperando = sum(1 for r in results if r.status == "esperando atualizar")
     total_vazios = sum(1 for r in results if r.status == "")
     total_erros = sum(1 for r in results if r.status.startswith("Erro"))
 
@@ -278,6 +294,7 @@ def main() -> int:
     print(f"Modo: {'APPLY (Gravando na Folha)' if apply else 'DRY-RUN (Simulação)'}")
     print(f"Total de linhas avaliadas: {len(results)}")
     print(f"Validados: {total_validados}")
+    print(f"Esperando atualizar: {total_esperando}")
     print(f"Vazios (Transferências): {total_vazios}")
     print(f"Linhas com Erro: {total_erros}")
     print(f"Consultas individuais de fallback: {fallback_lookups}")
@@ -294,7 +311,7 @@ def main() -> int:
     if apply:
         cell_range = f"{soma_col_letter}2:{soma_col_letter}{len(co_values)}"
         logger.info(f"Gravando {len(output_cells)} células na coluna {soma_col_letter} ({cell_range})...")
-        sheets._ws.update(cell_range, output_cells, value_input_option=ValueInputOption.user_entered)
+        sheets._ws.update(range_name=cell_range, values=output_cells, value_input_option=ValueInputOption.user_entered)
         logger.info("Coluna SOMA atualizada com sucesso na CONTAORDEM!")
     else:
         print("\n[DRY-RUN] Nenhuma alteração gravada. Use --apply para persistir na folha.")
