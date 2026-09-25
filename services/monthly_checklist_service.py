@@ -223,16 +223,8 @@ def find_first_period(
             row for row in rows
             if is_empty_auditoria(row.auditoria) and is_entrada_ou_saida(row.tipo)
         ]
-        if not pending_rows:
-            pending_rows = [
-                row for row in rows
-                if is_empty_auditoria(row.auditoria)
-                and not (row.tipo == TipoMovimento.TRANSFERENCIA or is_transferencia(getattr(row.tipo, "value", str(row.tipo))))
-            ]
     else:
         pending_rows = [row for row in rows if is_entrada_ou_saida(row.tipo)]
-        if not pending_rows:
-            pending_rows = rows
 
     dates = [parse_date_key(row.data_mov) for row in pending_rows]
     valid_dates = [item for item in dates if item is not None]
