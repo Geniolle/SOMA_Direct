@@ -12,7 +12,15 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from config.settings import Settings
 from core.http_session import ResilientSession
-from domain.models import ContaOrdemRow, TipoMovimento, is_entrada_ou_saida, normalize_date_str
+from domain.models import (
+    ContaOrdemRow,
+    TipoMovimento,
+    extract_suffix_n,
+    is_entrada_ou_saida,
+    normalize_date_str,
+    strip_date_prefix,
+    strip_suffix_n,
+)
 from services.repasse_service import extract_rows, extract_tables, parse_decimal_pt, strip_tags
 
 
@@ -113,6 +121,13 @@ class InternalAuditResult:
     row: ContaOrdemChecklistRow
     resultado: str
     auditoria_proposta: str
+
+
+@dataclass(frozen=True)
+class ContaOrdemOriginValidationResult:
+    row: ContaOrdemChecklistRow
+    resultado: str
+    origem_proposta: str
 
 
 def normalize_plan(value: str) -> str:
@@ -567,6 +582,132 @@ def validate_internal_rows(
             results.append(InternalAuditResult(row, "CONFERIDO", "Conferido"))
 
     return results
+
+
+def validate_contaordem_origin_rows(
+    rows: Iterable[ContaOrdemChecklistRow],
+    source_records_by_process: Dict[str, List[Dict[str, Any]]],
+    soma_records: Optional[List[Dict[str, Any]]] = None,
+) -> List[ContaOrdemOriginValidationResult]:
+    rows = list(rows)
+    source_by_process = {
+        normalize_text(process): build_records_by_id(records)
+        for process, records in source_records_by_process.items()
+    }
+    sequence_errors = _descricao_soma_sequence_errors(rows, soma_records or [])
+    results: List[ContaOrdemOriginValidationResult] = []
+
+    for row in rows:
+        errors = list(sequence_errors.get(row.row_number, []))
+        process_key = normalize_text(row.processo)
+        if not row.processo:
+            errors.append("PROCESSO vazio na CONTAORDEM")
+        if not row.id_interno:
+            errors.append("ID_INTERNO vazio na CONTAORDEM")
+
+        source_record = None
+        if process_key and row.id_interno:
+            matches = source_by_process.get(process_key, {}).get(row.id_interno, [])
+            if len(matches) == 1:
+                source_record = matches[0]
+            elif len(matches) > 1:
+                errors.append(f"ID_INTERNO duplicado na origem {row.processo}: {row.id_interno}")
+            else:
+                errors.append(f"ID_INTERNO não encontrado na origem {row.processo}: {row.id_interno}")
+
+        if source_record is not None:
+            source_date = normalize_date_str(pick_first_value(source_record, ("DATA VALOR", "DATA MOV.", "DATA", "PAGAMENTO")))
+            if not source_date:
+                errors.append("DATA ausente na origem")
+            elif source_date != row.data_mov:
+                errors.append(f"DATA divergente na origem: origem={source_date} contaordem={row.data_mov}")
+
+            source_amount_raw = pick_first_value(source_record, ("VALOR", "IMPORTÂNCIA", "VALOR DA COMPRA", "MONTANTE", "VALOR A PAGAR"))
+            try:
+                source_amount = abs(parse_decimal_money(source_amount_raw))
+                if source_amount != row.valor:
+                    errors.append(f"VALOR divergente na origem: origem={format_money(source_amount)} contaordem={format_money(row.valor)}")
+            except Exception:
+                errors.append(f"VALOR inválido/ausente na origem: {source_amount_raw}")
+
+            source_doc = normalize_doc(pick_first_value(source_record, ("DOC. SOMA", "DOC SOMA", "CODIGO", "CÓDIGO")))
+            row_doc = normalize_doc(row.doc_soma)
+            if source_doc != row_doc:
+                errors.append(f"DOC. SOMA divergente na origem: origem={source_doc or 'vazio'} contaordem={row_doc or 'vazio'}")
+
+        if errors:
+            results.append(ContaOrdemOriginValidationResult(row, "DIVERGENTE", "Erro: " + "; ".join(errors)))
+        else:
+            results.append(ContaOrdemOriginValidationResult(row, "VALIDADO", "Validado"))
+
+    return results
+
+
+def _descricao_soma_sequence_errors(
+    rows: Iterable[ContaOrdemChecklistRow],
+    soma_records: Iterable[Dict[str, Any]],
+) -> Dict[int, List[str]]:
+    errors: Dict[int, List[str]] = defaultdict(list)
+    duplicates: Dict[Tuple[str, str], List[ContaOrdemChecklistRow]] = defaultdict(list)
+    groups: Dict[Tuple[str, str], List[ContaOrdemChecklistRow]] = defaultdict(list)
+    soma_by_doc = build_soma_by_doc(soma_records)
+    soma_sequences: Dict[Tuple[str, str], set[int]] = defaultdict(set)
+
+    for record in soma_records:
+        data = normalize_date_str(pick_first_value(record, ("PAGAMENTO", "DATA", "DATA MOV.", "DATA VALOR")))
+        desc = pick_first_value(record, ("DESCRIÇÃO", "DESCRICAO"))
+        base = strip_date_prefix(strip_suffix_n(desc)).strip()
+        suffix = extract_suffix_n(desc)
+        if data and base and suffix is not None:
+            soma_sequences[(data, normalize_text(base))].add(suffix)
+
+    for row in rows:
+        data = normalize_date_str(row.data_mov)
+        desc = str(row.descricao_soma or "").strip()
+        if not data or not desc:
+            continue
+        normalized_desc = normalize_text(desc)
+        duplicates[(data, normalized_desc)].append(row)
+        base = strip_date_prefix(strip_suffix_n(desc)).strip()
+        if base:
+            groups[(data, normalize_text(base))].append(row)
+
+    for (data, _), items in duplicates.items():
+        if len(items) <= 1:
+            continue
+        rows_text = ", ".join(str(item.row_number) for item in items)
+        desc = items[0].descricao_soma
+        for item in items:
+            errors[item.row_number].append(
+                f"DESCRIÇÃO SOMA duplicada no mesmo dia {data}: '{desc}' nas linhas {rows_text}"
+            )
+
+    for (data, base_key), items in groups.items():
+        has_same_day_sequence = bool(soma_sequences.get((data, base_key)))
+        for expected, item in enumerate(sorted(items, key=lambda r: r.row_number), start=1):
+            current = extract_suffix_n(item.descricao_soma)
+            row_doc = normalize_doc(item.doc_soma)
+            official_desc = ""
+            soma_matches = soma_by_doc.get(row_doc, []) if row_doc else []
+            if len(soma_matches) == 1:
+                official_desc = pick_first_value(soma_matches[0], ("DESCRIÇÃO", "DESCRICAO"))
+                if normalize_text(official_desc) == normalize_text(item.descricao_soma):
+                    continue
+
+            if current is None:
+                if len(items) > 1 or has_same_day_sequence:
+                    errors[item.row_number].append(
+                        f"Sequencial ausente em DESCRIÇÃO SOMA para '{item.descricao_soma}'"
+                    )
+                continue
+
+            official_suffix = extract_suffix_n(official_desc)
+            if official_suffix is not None and current != official_suffix:
+                errors[item.row_number].append(
+                    f"Sequencial inválido em DESCRIÇÃO SOMA: atual=N{current:03d} esperado=N{official_suffix:03d}"
+                )
+
+    return errors
 
 
 class MonthlyChecklistSomaReports:

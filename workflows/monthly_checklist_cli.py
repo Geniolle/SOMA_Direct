@@ -14,6 +14,7 @@ if __package__ in (None, ""):
 from workflows.monthly_checklist_orchestrator import (
     MonthlyChecklistOrchestrator,
     print_monthly_checklist_report,
+    print_origin_validation_report,
 )
 
 
@@ -27,6 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--forcar-todos", action="store_true", help="Valida todas as linhas do mês, inclusive as que já têm AUDITORIA preenchida.")
     parser.add_argument("--apenas-conferidos", action="store_true", help="Grava em CONTAORDEM.AUDITORIA apenas os registos validados como CONFERIDO.")
     parser.add_argument("--max-periodos", type=int, default=None, help="Número máximo de períodos a processar no modo contínuo.")
+    parser.add_argument("--validar-origem", action="store_true", help="Valida DESCRIÇÃO SOMA e origem por PROCESSO/ID_INTERNO, gravando o resultado na coluna ORIGEM quando em modo apply.")
     return parser
 
 
@@ -68,6 +70,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         print()
 
     only_empty = not args.forcar_todos
+
+    if args.validar_origem:
+        result = orchestrator.validate_origin_column(
+            ano=ano,
+            mes=mes,
+            apply=apply,
+        )
+        print_origin_validation_report(result)
+        return 0
 
     if ano is not None and mes is not None:
         result = orchestrator.run(

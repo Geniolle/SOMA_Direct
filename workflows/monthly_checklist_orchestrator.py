@@ -16,13 +16,14 @@ if __package__ in (None, ""):
 from config.settings import Settings
 from core.auth import SomaAuthenticator
 from core.http_session import ResilientSession
-from domain.models import ContaOrdemRow, norm_basic
+from domain.models import ContaOrdemRow, TipoMovimento, norm_basic
 from services.monthly_checklist_service import (
     BalanceteComparison,
     ChecklistPeriod,
     FluxoMatchResult,
     InternalAuditResult,
     MonthlyChecklistSomaReports,
+    ContaOrdemOriginValidationResult,
     aggregate_contaordem,
     compare_balancete,
     filter_month_rows,
@@ -34,7 +35,9 @@ from services.monthly_checklist_service import (
     parse_balancete_html,
     parse_fluxo_caixa_html,
     representative_plans,
+    row_to_checklist,
     summarize_fluxo,
+    validate_contaordem_origin_rows,
     validate_internal_rows,
 )
 from services.sheets_service import (
@@ -55,6 +58,14 @@ class MonthlyChecklistResult:
     fluxo_results: List[FluxoMatchResult]
     internal_results: List[InternalAuditResult]
     rows_to_validate: List = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ContaOrdemOriginValidationRun:
+    period: Optional[ChecklistPeriod]
+    total_rows: int
+    results: List[ContaOrdemOriginValidationResult]
+    applied: int = 0
 
 
 class MonthlyChecklistOrchestrator:
@@ -202,6 +213,35 @@ class MonthlyChecklistOrchestrator:
         print_overall_summary(results, apply=apply)
         return results
 
+    def validate_origin_column(
+        self,
+        ano: Optional[int] = None,
+        mes: Optional[int] = None,
+        apply: bool = False,
+    ) -> ContaOrdemOriginValidationRun:
+        all_rows = self.sheets.get_all_rows(only_entrada_saida=False)
+        period = month_period(ano, mes) if ano is not None and mes is not None else None
+        if period is not None:
+            rows, _ = filter_month_rows(all_rows, period)
+        else:
+            rows = [
+                row_to_checklist(row)
+                for row in all_rows
+                if row.tipo in (TipoMovimento.ENTRADA, TipoMovimento.SAIDA)
+            ]
+
+        results = validate_contaordem_origin_rows(rows, self._load_source_records(rows), self._load_soma_records())
+        applied = 0
+        if apply:
+            applied = self._apply_origem(results, all_rows=all_rows)
+            print(f"-> [CONTAORDEM] {applied} registo(s) gravado(s) na coluna ORIGEM.")
+        return ContaOrdemOriginValidationRun(
+            period=period,
+            total_rows=len(rows),
+            results=results,
+            applied=applied,
+        )
+
     def _load_source_records(self, rows: List) -> dict[str, list[dict]]:
         processes = {row.processo for row in rows if row.processo}
         out: dict[str, list[dict]] = {}
@@ -262,6 +302,41 @@ class MonthlyChecklistOrchestrator:
                 continue
             cell = f"{self.sheets._col_letter(auditoria_idx + 1)}{row.row_number}"
             updates.append({"range": cell, "values": [[result.auditoria_proposta]]})
+            applied_count += 1
+        if updates:
+            _with_sheets_retry(lambda: self.sheets._ws.batch_update(updates))
+        return applied_count
+
+    def _apply_origem(
+        self,
+        results: List[ContaOrdemOriginValidationResult],
+        all_rows: Optional[List[ContaOrdemRow]] = None,
+    ) -> int:
+        headers = self.sheets.get_headers()
+        header_map = {norm_basic(header): idx for idx, header in enumerate(headers)}
+        origem_idx = header_map.get(norm_basic("ORIGEM"))
+        id_idx = header_map.get(norm_basic("ID_INTERNO"))
+        if origem_idx is None or id_idx is None:
+            raise RuntimeError("CONTAORDEM precisa das colunas ORIGEM e ID_INTERNO")
+
+        id_by_row: dict[int, str] = {}
+        if all_rows is not None:
+            id_by_row = {r.row_number: r.id_interno for r in all_rows}
+        else:
+            all_values = _with_sheets_retry(lambda: self.sheets._ws.get_all_values())
+            for idx, r in enumerate(all_values, start=1):
+                if id_idx < len(r):
+                    id_by_row[idx] = r[id_idx].strip()
+
+        updates = []
+        applied_count = 0
+        for result in results:
+            row = result.row
+            current_id = id_by_row.get(row.row_number, "")
+            if current_id != row.id_interno:
+                continue
+            cell = f"{self.sheets._col_letter(origem_idx + 1)}{row.row_number}"
+            updates.append({"range": cell, "values": [[result.origem_proposta]]})
             applied_count += 1
         if updates:
             _with_sheets_retry(lambda: self.sheets._ws.batch_update(updates))
@@ -380,6 +455,34 @@ def print_monthly_checklist_report(result: MonthlyChecklistResult) -> None:
                 row.doc_soma,
                 item.resultado,
                 item.auditoria_proposta,
+            ])
+        )
+
+
+def print_origin_validation_report(result: ContaOrdemOriginValidationRun) -> None:
+    label = result.period.label if result.period else "TODOS"
+    summary = Counter(item.resultado for item in result.results)
+    print(f"VALIDAÇÃO ORIGEM CONTAORDEM - {label}")
+    print("=" * 37)
+    print(f"Registos avaliados: {result.total_rows}")
+    print(f"Validados: {summary.get('VALIDADO', 0)}")
+    print(f"Divergentes: {summary.get('DIVERGENTE', 0)}")
+    if result.applied:
+        print(f"Gravados na coluna ORIGEM: {result.applied}")
+    print()
+    print("ID_INTERNO | DATA | PROCESSO | DOC_SOMA | RESULTADO | ORIGEM_PROPOSTA")
+    for item in result.results:
+        if item.resultado == "VALIDADO":
+            continue
+        row = item.row
+        print(
+            " | ".join([
+                row.id_interno,
+                row.data_mov,
+                row.processo,
+                row.doc_soma,
+                item.resultado,
+                item.origem_proposta,
             ])
         )
 

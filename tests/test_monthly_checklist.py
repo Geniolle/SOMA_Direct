@@ -18,6 +18,7 @@ from services.monthly_checklist_service import (
     parse_decimal_money,
     parse_fluxo_caixa_html,
     representative_plans,
+    validate_contaordem_origin_rows,
     validate_internal_rows,
 )
 from workflows.monthly_checklist_orchestrator import (
@@ -58,6 +59,7 @@ def row(
     plano,
     id_interno="ID1",
     desc="Dízimo",
+    desc_soma=None,
 ):
     raw = {
         "DATA MOV.": data,
@@ -68,7 +70,7 @@ def row(
         "AUDITORIA": "",
         "DOC. SOMA": "123",
         "DESCRIÇÃO": desc,
-        "DESCRIÇÃO SOMA": desc,
+        "DESCRIÇÃO SOMA": desc if desc_soma is None else desc_soma,
         "CENTRO DE CUSTO": "CC",
         "CAIXA": "CAIXA DIÁRIO",
         "FORMA DE PAGAMENTO": "Transferência",
@@ -271,6 +273,123 @@ def test_auditoria_interna_descreve_inconsistencias():
     assert "DOC.SOMA não encontrado na sheet SOMA" in result.auditoria_proposta
 
 
+def test_validacao_origem_confere_data_valor_doc_soma():
+    selected, _ = filter_month_rows([
+        row(2, "01/01/2024", "Entrada", "100,00", "DOAÇÕES", "ID1", desc_soma="Oferta N001"),
+    ], month_period(2024, 1))
+    source = {
+        "T_EXTRATO": [{
+            "ID_INTERNO": "ID1",
+            "DATA VALOR": "01/01/2024",
+            "VALOR": "100,00",
+            "DOC. SOMA": "123",
+        }]
+    }
+
+    soma = [{"CODIGO": "123", "PAGAMENTO": "01/01/2024", "VALOR": "100,00", "DESCRIÇÃO": "Oferta N001"}]
+
+    result = validate_contaordem_origin_rows(selected, source, soma)[0]
+
+    assert result.resultado == "VALIDADO"
+    assert result.origem_proposta == "Validado"
+
+
+def test_validacao_origem_aponta_descricao_soma_duplicada_no_mesmo_dia():
+    selected, _ = filter_month_rows([
+        row(2, "01/01/2024", "Entrada", "100,00", "DOAÇÕES", "ID1", desc_soma="Oferta N001"),
+        row(3, "01/01/2024", "Entrada", "50,00", "DOAÇÕES", "ID2", desc_soma="Oferta N001"),
+        row(4, "02/01/2024", "Entrada", "75,00", "DOAÇÕES", "ID3", desc_soma="Oferta N001"),
+    ], month_period(2024, 1))
+    source = {
+        "T_EXTRATO": [
+            {"ID_INTERNO": "ID1", "DATA VALOR": "01/01/2024", "VALOR": "100,00", "DOC. SOMA": "123"},
+            {"ID_INTERNO": "ID2", "DATA VALOR": "01/01/2024", "VALOR": "50,00", "DOC. SOMA": "123"},
+            {"ID_INTERNO": "ID3", "DATA VALOR": "02/01/2024", "VALOR": "75,00", "DOC. SOMA": "123"},
+        ]
+    }
+
+    soma = [
+        {"CODIGO": "123", "PAGAMENTO": "01/01/2024", "VALOR": "100,00", "DESCRIÇÃO": "Oferta N001"},
+    ]
+
+    results = validate_contaordem_origin_rows(selected, source, soma)
+
+    assert results[0].resultado == "DIVERGENTE"
+    assert results[1].resultado == "DIVERGENTE"
+    assert "DESCRIÇÃO SOMA duplicada no mesmo dia 01/01/2024" in results[0].origem_proposta
+    assert results[2].resultado == "VALIDADO"
+
+
+def test_validacao_origem_usa_sequencial_oficial_da_sheet_soma():
+    selected, _ = filter_month_rows([
+        row(2, "01/01/2024", "Saída", "25,00", "MATERIAL", "ID1", desc_soma="Insumos DI N004"),
+    ], month_period(2024, 1))
+    source = {
+        "T_EXTRATO": [{
+            "ID_INTERNO": "ID1",
+            "DATA": "01/01/2024",
+            "VALOR": "25,00",
+            "DOC. SOMA": "123",
+        }]
+    }
+    soma = [{
+        "CODIGO": "123",
+        "PAGAMENTO": "01/01/2024",
+        "VALOR": "25,00",
+        "DESCRIÇÃO": "Insumos DI N004",
+    }]
+
+    result = validate_contaordem_origin_rows(selected, source, soma)[0]
+
+    assert result.resultado == "VALIDADO"
+
+
+def test_apply_origem_escreve_coluna_origem_por_id():
+    class FakeWorksheet:
+        def __init__(self):
+            self.headers = ["ID_INTERNO", "ORIGEM", "OUTRA"]
+            self.rows = {2: ["ID1", "", "preservar"]}
+            self.updates = []
+
+        def get_all_values(self):
+            return [self.headers, self.rows[2]]
+
+        def batch_update(self, updates):
+            self.updates.extend(updates)
+            for update in updates:
+                assert update["range"] == "B2"
+                self.rows[2][1] = update["values"][0][0]
+
+    class FakeSheets:
+        def __init__(self):
+            self._ws = FakeWorksheet()
+
+        def get_headers(self):
+            return self._ws.headers
+
+        @staticmethod
+        def _col_letter(col_idx):
+            return "AB"[col_idx - 1]
+
+    selected, _ = filter_month_rows([
+        row(2, "01/01/2024", "Entrada", "100,00", "DOAÇÕES", "ID1", desc_soma="Oferta N001"),
+    ], month_period(2024, 1))
+    result = validate_contaordem_origin_rows(selected, {
+        "T_EXTRATO": [{"ID_INTERNO": "ID1", "DATA": "01/01/2024", "VALOR": "100,00", "DOC. SOMA": "123"}]
+    }, [
+        {"CODIGO": "123", "PAGAMENTO": "01/01/2024", "VALOR": "100,00", "DESCRIÇÃO": "Oferta N001"}
+    ])[0]
+    orch = object.__new__(MonthlyChecklistOrchestrator)
+    orch.sheets = FakeSheets()
+
+    applied = orch._apply_origem([result], all_rows=[
+        row(2, "01/01/2024", "Entrada", "100,00", "DOAÇÕES", "ID1", desc_soma="Oferta N001"),
+    ])
+
+    assert applied == 1
+    assert orch.sheets._ws.rows[2] == ["ID1", "Validado", "preservar"]
+
+
 def test_monthly_checklist_cli_supports_direct_file_execution(tmp_path):
     import subprocess
     import sys
@@ -391,6 +510,33 @@ def test_cli_modo_periodo_especifico(monkeypatch):
     assert fake_orch.run_called_with == (2024, 3, True, True, False)
 
 
+def test_cli_modo_validar_origem(monkeypatch):
+    from workflows import monthly_checklist_cli
+
+    class FakeOrchestrator:
+        def __init__(self):
+            self.validate_called_with = None
+
+        def validate_origin_column(self, ano=None, mes=None, apply=False):
+            self.validate_called_with = (ano, mes, apply)
+            from workflows.monthly_checklist_orchestrator import ContaOrdemOriginValidationRun
+            return ContaOrdemOriginValidationRun(
+                period=month_period(2024, 3),
+                total_rows=0,
+                results=[],
+                applied=0,
+            )
+
+    fake_orch = FakeOrchestrator()
+    monkeypatch.setattr(monthly_checklist_cli, "MonthlyChecklistOrchestrator", lambda: fake_orch)
+    monkeypatch.setattr(monthly_checklist_cli, "print_origin_validation_report", lambda res: None)
+
+    exit_code = monthly_checklist_cli.main(["--validar-origem", "--ano", "2024", "--mes", "3", "--dry-run"])
+
+    assert exit_code == 0
+    assert fake_orch.validate_called_with == (2024, 3, False)
+
+
 def test_run_until_complete_orchestrator(monkeypatch):
     orch = object.__new__(MonthlyChecklistOrchestrator)
     fake_auth = type("FakeAuth", (), {"login": lambda self: True})()
@@ -502,6 +648,3 @@ def test_with_sheets_retry_backs_off_on_429():
     result = _with_sheets_retry(flaky_call, max_retries=5, initial_wait=0.001)
     assert result == "SUCCESS"
     assert attempts == 3
-
-
-
