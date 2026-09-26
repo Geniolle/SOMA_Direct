@@ -83,7 +83,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override manual: total de Receitas de Livraria.",
     )
+    parser.add_argument(
+        "--total",
+        type=str,
+        default=None,
+        help="Override do valor total do repasse (contrapor valor com rateio proporcional).",
+    )
     return parser
+
 
 
 def exibir_tabela_preview(preview: RepassePreview, mes: int, ano: int) -> None:
@@ -187,18 +194,69 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
 
-    # 3. Exibir Preview
-    exibir_tabela_preview(preview, mes, ano)
+    # 3. Aplicar override de total se fornecido por argumento
+    if args.total:
+        try:
+            total_override = parse_decimal(args.total)
+            from services.repasse_mvv_service import RepasseMvvService
+            novos_itens = RepasseMvvService.recalcular_por_novo_total(preview.itens, total_override)
+            preview = RepassePreview(
+                bases=preview.bases,
+                itens=novos_itens,
+                total_repasse=total_override,
+                existentes_soma=preview.existentes_soma,
+            )
+        except Exception as e:
+            print(f"[ERRO] Falha ao aplicar --total: {e}")
+            return 1
 
-    # 4. Modo de execução (Dry-run vs Real)
+    # 4. Loop de Exibição e Confirmação
     dry_run = args.dry_run
-    if not dry_run and not args.apply and not args.yes:
+    while True:
+        exibir_tabela_preview(preview, mes, ano)
+
+        if dry_run:
+            print("\nModo: SIMULAÇÃO (Dry-Run ativo — nenhum dado será enviado ao SOMA)")
+            if not args.yes:
+                conf = input("\nDeseja executar o teste de envio em dry-run? (s/N): ").strip().lower()
+                if conf not in ("s", "sim", "y", "yes"):
+                    print("\nOperação cancelada.")
+                    return 0
+            break
+
+        if args.apply or args.yes:
+            break
+
         conf = input("\nDeseja GRAVAR estes 5 repasses no SOMA? (s/N): ").strip().lower()
-        if conf not in ("s", "sim", "y", "yes"):
-            print("\nOperação cancelada. Nenhum repasse foi gravado no SOMA.")
-            return 0
-    elif dry_run:
-        print("\nModo: SIMULAÇÃO (Dry-Run ativo — nenhum dado será enviado ao SOMA)")
+        if conf in ("s", "sim", "y", "yes"):
+            break
+        else:
+            print("\nOpções:")
+            print("  1. Sair (não quero executar)")
+            print("  2. Informar outro valor total de repasse (contrapor valor)")
+            opcao = input("\nEscolha uma opção [1/2] (padrão 1): ").strip()
+            if opcao == "2":
+                novo_val_str = input("\nInforme o novo valor total do repasse (€) [ex: 643,74]: ").strip()
+                try:
+                    novo_total = parse_decimal(novo_val_str)
+                    if novo_total <= 0:
+                        print("[ERRO] O valor total deve ser maior que zero.")
+                        continue
+                    from services.repasse_mvv_service import RepasseMvvService
+                    novos_itens = RepasseMvvService.recalcular_por_novo_total(preview.itens, novo_total)
+                    preview = RepassePreview(
+                        bases=preview.bases,
+                        itens=novos_itens,
+                        total_repasse=novo_total,
+                        existentes_soma=preview.existentes_soma,
+                    )
+                    print(f"\n[OK] Valores recalculados com base no total de {format_decimal_pt(novo_total)} €.")
+                    # Continua no loop e reexibe a tabela preview com os novos valores
+                except Exception as e:
+                    print(f"[ERRO] Valor inválido: {e}")
+            else:
+                print("\nOperação cancelada. Nenhum repasse foi gravado no SOMA.")
+                return 0
 
     # 5. Executar submissão
     print(f"\nIniciando gravação de {len(preview.itens)} repasses no SOMA...")
@@ -208,6 +266,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         mes=mes,
         dry_run=dry_run,
     )
+
 
     # 6. Resumo final
     print("\n" + "=" * 76)

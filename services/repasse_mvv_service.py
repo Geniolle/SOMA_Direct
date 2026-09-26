@@ -245,6 +245,75 @@ class RepasseMvvService:
         ]
         return resultados
 
+    @staticmethod
+    def recalcular_por_novo_total(
+        itens_originais: List[RepasseCalculado],
+        novo_total: Decimal,
+    ) -> List[RepasseCalculado]:
+        """Ajusta proporcionalmente os repasses para que a soma feche rigorosamente no novo_total informado."""
+        total_orig = sum((it.valor for it in itens_originais), Decimal("0.00"))
+        novos: List[RepasseCalculado] = []
+        soma = Decimal("0.00")
+
+        if total_orig > 0:
+            fator = novo_total / total_orig
+            for it in itens_originais:
+                novo_valor = (it.valor * fator).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                novos.append(
+                    RepasseCalculado(
+                        id_plano_contas=it.id_plano_contas,
+                        plano_nome=it.plano_nome,
+                        aliquota_desc=it.aliquota_desc,
+                        conta_santander_id=it.conta_santander_id,
+                        conta_santander_numero=it.conta_santander_numero,
+                        valor=novo_valor,
+                        detalhe_calculo=f"Ajuste proporcional ao total ({format_decimal_pt(novo_total)} €): {format_decimal_pt(it.valor)} x {fator:.4f}",
+                    )
+                )
+                soma += novo_valor
+        else:
+            # Fallback pelas alíquotas nominais 10%, 2%, 2%, 1%, 3% = 18%
+            total_pct = Decimal("18")
+            mapa_pesos = {
+                "369": Decimal("10"),
+                "370": Decimal("2"),
+                "372": Decimal("2"),
+                "371": Decimal("1"),
+                "373": Decimal("3"),
+            }
+            for it in itens_originais:
+                peso = mapa_pesos.get(it.id_plano_contas, Decimal("0"))
+                novo_valor = (novo_total * (peso / total_pct)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                novos.append(
+                    RepasseCalculado(
+                        id_plano_contas=it.id_plano_contas,
+                        plano_nome=it.plano_nome,
+                        aliquota_desc=it.aliquota_desc,
+                        conta_santander_id=it.conta_santander_id,
+                        conta_santander_numero=it.conta_santander_numero,
+                        valor=novo_valor,
+                        detalhe_calculo=f"Rateio nominal ({peso}/18) sobre {format_decimal_pt(novo_total)} €",
+                    )
+                )
+                soma += novo_valor
+
+        # Ajuste residual de cêntimos no maior item para a soma ser idêntica ao novo_total
+        diff = novo_total - soma
+        if diff != 0 and novos:
+            idx_maior = max(range(len(novos)), key=lambda i: novos[i].valor)
+            maior_item = novos[idx_maior]
+            novos[idx_maior] = RepasseCalculado(
+                id_plano_contas=maior_item.id_plano_contas,
+                plano_nome=maior_item.plano_nome,
+                aliquota_desc=maior_item.aliquota_desc,
+                conta_santander_id=maior_item.conta_santander_id,
+                conta_santander_numero=maior_item.conta_santander_numero,
+                valor=maior_item.valor + diff,
+                detalhe_calculo=maior_item.detalhe_calculo + f" (ajuste residual de {diff:+.2f} €)",
+            )
+
+        return novos
+
     def fetch_existing_repasses(self, ano: int, mes: int) -> List[Dict[str, Any]]:
         """Consulta o SOMA para listar os repasses já existentes daquele mês."""
         last_day = calendar.monthrange(ano, mes)[1]

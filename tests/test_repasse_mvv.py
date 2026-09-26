@@ -94,3 +94,35 @@ def test_dry_run_submission():
     assert res.repasse_id is None
     assert "Dry-run" in res.mensagem
     mock_http.post.assert_not_called()
+
+
+def test_recalcular_por_novo_total_contraposto():
+    """Testa a contraposição de valor: recalcular 5 itens a partir de um novo total (ex: 643.74)."""
+    bases = BaseReceitasMes(
+        ano=2026,
+        mes=8,
+        doacoes_dizimos_ofertas=Decimal("4211.60"),
+        receitas_lanchonete=Decimal("0.00"),
+        receitas_livraria=Decimal("0.00"),
+        total_entrada=Decimal("4211.60"),
+        origem="TESTE",
+    )
+    itens_orig = RepasseMvvService.calcular_repasses(bases)
+    # Total original: 421.16 + 84.23 + 84.23 + 42.12 = 631.74 €
+    tot_orig = sum((it.valor for it in itens_orig), Decimal("0.00"))
+    assert tot_orig == Decimal("631.74")
+
+    # Recalcula contrapondo para 643.74 €
+    novo_total = Decimal("643.74")
+    novos_itens = RepasseMvvService.recalcular_por_novo_total(itens_orig, novo_total)
+
+    tot_novo = sum((it.valor for it in novos_itens), Decimal("0.00"))
+    assert tot_novo == Decimal("643.74")
+    assert len(novos_itens) == 5
+
+    mapa = {it.id_plano_contas: it.valor for it in novos_itens}
+    assert mapa["369"] == Decimal("429.16")  # Dízimos
+    assert mapa["370"] == Decimal("85.83")   # COVV
+    assert mapa["372"] == Decimal("85.83")   # Novas Obras
+    assert mapa["371"] == Decimal("42.92")   # Missões
+
