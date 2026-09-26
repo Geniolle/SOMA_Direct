@@ -46,16 +46,27 @@ class CheckRowResult:
     details: str
 
 
+def extract_status_from_dados_doc(dados_doc: str) -> str:
+    """Extrai o status (ex: 'Registrado', 'Não conferido') da string DADOS DOC."""
+    if "Não conferido" in dados_doc:
+        return "Não conferido"
+    elif "Registrado" in dados_doc:
+        return "Registrado"
+    return "Desconhecido"
+
+
 def parse_soma_baixa(html: str) -> Optional[Dict[str, str]]:
     """Extrai informações da tabela de baixas do HTML do documento no SOMA."""
     rows = re.findall(r"<tr\b[^>]*>(.*?)</tr>", html, re.DOTALL)
     for r in rows:
         tds = [re.sub(r"<[^>]+>", " ", c).strip() for c in re.findall(r"<td\b[^>]*>(.*?)</td>", r, re.DOTALL)]
-        if len(tds) >= 4 and "Registrado" in tds[3]:
+        if len(tds) >= 4 and ("Registrado" in tds[3] or "Não conferido" in tds[3]):
+            status = extract_status_from_dados_doc(tds[3])
             return {
                 "data_pagamento": tds[1],
                 "data_baixa": tds[2],
                 "dados_doc": tds[3],
+                "status": status,
                 "valor": tds[4] if len(tds) > 4 else "",
             }
     return None
@@ -216,6 +227,7 @@ def main() -> int:
         soma_caixa = ""
         soma_forma = ""
 
+        soma_status = ""
         if needs_fetch:
             time.sleep(0.3)
             fetched_count += 1
@@ -226,6 +238,7 @@ def main() -> int:
                 if b_info:
                     dados_doc_final = b_info["dados_doc"]
                     soma_dt = b_info["data_pagamento"]
+                    soma_status = b_info.get("status", "")
                     soma_caixa, soma_forma = parse_caixa_forma(dados_doc_final)
                     if dados_doc_final != dados:
                         dados_updated = True
@@ -238,9 +251,13 @@ def main() -> int:
                 dados_doc_final = dados
         else:
             soma_caixa, soma_forma = parse_caixa_forma(dados)
+            if dados:
+                soma_status = extract_status_from_dados_doc(dados)
 
         # Validação de Coerência
-        if not soma_caixa and not soma_forma:
+        if soma_status == "Não conferido":
+            check_status = "Não conferido"
+        elif not soma_caixa and not soma_forma:
             check_status = "Erro: Baixa não encontrada no SOMA"
         else:
             ok, errors = validate_check_coherence(
@@ -275,6 +292,7 @@ def main() -> int:
     # Estatísticas
     total_validados = sum(1 for r in results if r.check_status == "Validado")
     total_vazios = sum(1 for r in results if r.check_status == "")
+    total_nao_conferidos = sum(1 for r in results if r.check_status == "Não conferido")
     total_erros = sum(1 for r in results if r.check_status.startswith("Erro"))
 
     print("\n" + "=" * 80)
@@ -282,16 +300,17 @@ def main() -> int:
     print(f"Modo: {'APPLY (Gravando na Folha)' if apply else 'DRY-RUN (Simulação)'}")
     print(f"Total de linhas avaliadas: {len(results)}")
     print(f"Validados: {total_validados}")
+    print(f"Não conferidos (status SOMA): {total_nao_conferidos}")
     print(f"Vazios (Transferências): {total_vazios}")
     print(f"Linhas com Erro: {total_erros}")
     print(f"Consultas realizadas no portal SOMA: {fetched_count}")
     print(f"DADOS DOC atualizados com dados oficiais do SOMA: {updated_dados_count}")
     print("=" * 80)
 
-    if total_erros > 0:
-        print("\n--- DETALHAMENTO DAS LINHAS COM ERRO ---")
+    if total_erros > 0 or total_nao_conferidos > 0:
+        print("\n--- DETALHAMENTO DAS LINHAS COM ERRO OU NÃO CONFERIDAS ---")
         for r in results:
-            if r.check_status.startswith("Erro"):
+            if r.check_status.startswith("Erro") or r.check_status == "Não conferido":
                 print(f"Linha {r.row_number} | ID: {r.id_interno} | PROC: {r.processo} | DOC: {r.doc_soma}")
                 print(f"  CONTAORDEM: Data={r.data_mov}, Caixa='{r.caixa}', Forma='{r.forma_pagamento}'")
                 print(f"  DADOS DOC:  {r.dados_doc}")
