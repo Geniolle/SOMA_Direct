@@ -592,8 +592,9 @@ class GoogleSheetsService:
     ) -> None:
         """Atualiza primeiro a origem e depois conclui a linha na CONTAORDEM."""
         doc_id = str(doc_id or "").strip()
-        if not re.fullmatch(r"\d{7}", doc_id):
-            raise ValueError("DOC. SOMA deve conter exatamente 7 dígitos numéricos")
+        # Aceita: 7 dígitos (Entrada/Saída) ou TRF_##### (Transferência)
+        if not re.fullmatch(r"(\d{7}|TRF_\d+)", doc_id):
+            raise ValueError("DOC. SOMA deve conter 7 dígitos ou formato TRF_#####")
         if not processo or not id_interno:
             try:
                 row_data = self.get_row(row_idx)

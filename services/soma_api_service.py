@@ -190,10 +190,11 @@ class SomaApiService:
 
     def _find_transfer_id(self, valor: str, data_mov: str) -> Optional[str]:
         """Consulta buscarTransferenciasCaixas.php e retorna o ID da transferência."""
+        # Usar intervalo largo para cobrir transferências de qualquer ano
         resp = self.http.post_ajax(f"{self.base_url}sys/post/buscarTransferenciasCaixas.php", data={
             "id_inst": self.settings.institution_id,
-            "i": "01/01/2026",
-            "f": "31/12/2026"
+            "i": "01/01/2000",
+            "f": "31/12/2099"
         })
         clean_val = clean_amount(valor)
         for rw in re.findall(r'<tr\b[^>]*>(.*?)</tr>', resp.text, re.DOTALL):

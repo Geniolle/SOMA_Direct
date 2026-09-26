@@ -113,8 +113,13 @@ def strip_date_prefix(text: Any) -> str:
 
 
 def clean_caixa(caixa: Any) -> str:
-    """Remove sufixos entre colchetes como [CONTA CORRENTE] e normaliza."""
-    c = re.sub(r"\[.*?\]", "", str(caixa or "").strip()).strip()
+    """Remove sufixos entre colchetes e hífen, normaliza conta corrente/poupança."""
+    c = str(caixa or "").strip()
+    # Remove sufixos entre colchetes: [CONTA CORRENTE], [CONTA POUPANÇA]
+    c = re.sub(r"\[.*?\]", "", c).strip()
+    # Remove sufixos com hífen: - CC, - CP
+    c = re.sub(r"\s*-\s*(CC|CP|CONTA\s+CORRENTE|CONTA\s+POUPANÇA)\s*$", "", c, flags=re.IGNORECASE).strip()
+    # Normaliza
     return norm_basic(c)
 
 

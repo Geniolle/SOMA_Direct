@@ -88,16 +88,26 @@ class DirectOrchestrator:
     def _validate_launch_row(row: ContaOrdemRow) -> Optional[str]:
         required = {
             "DATA MOV.": row.data_mov,
-            "TIPO": row.tipo.value if is_entrada_ou_saida(row.tipo) else "",
+            "TIPO": row.tipo.value if row.tipo else "",
             "IMPORTÂNCIA": row.importancia,
-            "PLANO DE CONTA": row.plano_conta,
-            "CENTRO DE CUSTO": row.centro_custo,
-            "DESCRIÇÃO SOMA": row.descricao_soma,
             "CAIXA": row.caixa,
-            "FORMA DE PAGAMENTO": row.forma_pagamento,
             "PROCESSO": row.processo,
             "ID_INTERNO": row.id_interno,
         }
+        # Campos opcionais para Transferências (que não usam PLANO/CENTRO/FORMA)
+        if is_entrada_ou_saida(row.tipo):
+            required.update({
+                "PLANO DE CONTA": row.plano_conta,
+                "CENTRO DE CUSTO": row.centro_custo,
+                "DESCRIÇÃO SOMA": row.descricao_soma,
+                "FORMA DE PAGAMENTO": row.forma_pagamento,
+            })
+        else:
+            # Transferências precisam de descrição (obs) e caixa_saida
+            required["CAIXA SAÍDA"] = row.caixa_saida
+            if not row.descricao_soma and not row.descricao:
+                return "Campos obrigatórios ausentes: DESCRIÇÃO"
+
         missing = [name for name, value in required.items() if not str(value or "").strip()]
         if missing:
             return "Campos obrigatórios ausentes: " + ", ".join(missing)
@@ -110,6 +120,11 @@ class DirectOrchestrator:
         return None
 
     def _confirm_and_settle(self, row: ContaOrdemRow, doc_id: str) -> Optional[str]:
+        # Transferências não requerem conferência trilateral complexa
+        if row.tipo == TipoMovimento.TRANSFERENCIA:
+            logger.info(f"Transferência {doc_id} confirmada no SOMA (sem validação trilateral)")
+            return None
+
         record = self.audit_service.search_by_codigo(doc_id)
         if not record:
             return "Documento não localizado por código após o lançamento"
@@ -130,12 +145,38 @@ class DirectOrchestrator:
         return None
 
     def _process_claimed_row(self, row: ContaOrdemRow) -> OperationOutcome:
-        # 1. Pesquisa preventiva estrita por DATA MOV. + DESCRIÇÃO SOMA.
-        candidates = [
-            item for item in self.audit_service.search_by_descricao(row.descricao_soma, data_mov=row.data_mov)
-            if norm_basic(item.descricao) == norm_basic(row.descricao_soma)
-            and normalize_date_str(item.data) == normalize_date_str(row.data_mov)
-        ]
+        # 1. Pesquisa preventiva: diferentes estratégias por tipo
+        # Transferências são identificadas por valor+data, não por descrição
+        if row.tipo == TipoMovimento.TRANSFERENCIA:
+            existing_id = self.api._find_transfer_id(valor=row.importancia, data_mov=row.data_mov)
+            if existing_id:
+                doc_id = f"TRF_{existing_id}"
+                logger.info(f"-> Transferência já existe no SOMA (ID {doc_id}). Atualizando planilha...")
+                self.sheets.mark_row_completed(
+                    row_idx=row.row_number,
+                    doc_id=doc_id,
+                    dados_doc=f"Transferência recuperada do SOMA ({doc_id})",
+                    elapsed_ms=0,
+                    processo=row.processo,
+                    id_interno=row.id_interno,
+                )
+                return OperationOutcome(
+                    success=True,
+                    doc_id=doc_id,
+                    tipo=row.tipo.value,
+                    row_number=row.row_number,
+                    elapsed_ms=0,
+                    dados_doc="Transferência já existe"
+                )
+            # Transferência nova: prosseguir para criação
+            candidates = []
+        else:
+            # Entradas/Saídas: pesquisar por descrição
+            candidates = [
+                item for item in self.audit_service.search_by_descricao(row.descricao_soma, data_mov=row.data_mov)
+                if norm_basic(item.descricao) == norm_basic(row.descricao_soma)
+                and normalize_date_str(item.data) == normalize_date_str(row.data_mov)
+            ]
         if len(candidates) > 1:
             self.sheets.mark_row_duplicate(row.row_number, len(candidates))
             message = f"Pesquisa encontrou {len(candidates)} registros com a mesma data e descrição"
@@ -226,7 +267,7 @@ class DirectOrchestrator:
         return outcome
 
     def run_target_rows(self, row_indices: List[int], dry_run: bool = False) -> List[OperationOutcome]:
-        """Executa uma lista de linhas especificadas por índice."""
+        """Executa uma lista de linhas especificadas por índice (aceita qualquer tipo de registo)."""
         self.initialize()
 
         outcomes = []
@@ -236,9 +277,6 @@ class DirectOrchestrator:
             row = self.sheets.get_row(idx)
             if not row:
                 logger.error(f"Linha {idx} não encontrada na planilha!")
-                continue
-            if not is_entrada_ou_saida(row.tipo):
-                logger.warning(f"Linha {idx} ignorada: TIPO '{row.tipo.value}' não é Entrada ou Saída.")
                 continue
             outcomes.append(self.process_row(row, dry_run=dry_run))
 
