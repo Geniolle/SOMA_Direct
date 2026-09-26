@@ -18,6 +18,7 @@ from domain.models import (
     TipoMovimento,
     clean_amount_for_comparison,
     clean_caixa,
+    extract_suffix_n,
     is_entrada_ou_saida,
     norm_basic,
     normalize_date_str,
@@ -289,9 +290,125 @@ def print_final_result(
     print("=" * 60)
 
 
+def _import_missing_saida_entries(orchestrator) -> dict:
+    """Importa SAÍDAS com FINANCE vazio para CONTAORDEM (etapa prévia à ronda)."""
+    from collections import defaultdict
+
+    sheets = orchestrator.sheets
+    saidas_values = sheets.get_origin_worksheet("SAÍDAS").get_all_values()
+    if not saidas_values or len(saidas_values) < 2:
+        return {"imported": 0, "total_found": 0}
+
+    saidas_headers = saidas_values[0]
+    saidas_indices = {norm_basic(header): idx for idx, header in enumerate(saidas_headers)}
+
+    # Verificar coluna FINANCE
+    if norm_basic("FINANCE") not in saidas_indices:
+        return {"imported": 0, "total_found": 0, "error": "Coluna FINANCE nao encontrada"}
+
+    co_values = sheets._ws.get_all_values()
+    co_headers = co_values[0]
+    co_indices = {norm_basic(header): idx for idx, header in enumerate(co_headers)}
+
+    def saida_value(row, field):
+        idx = saidas_indices.get(norm_basic(field))
+        return row[idx].strip() if idx is not None and idx < len(row) else ""
+
+    def co_value(row, field):
+        idx = co_indices.get(norm_basic(field))
+        return row[idx].strip() if idx is not None and idx < len(row) else ""
+
+    existing_ids = {co_value(row, "ID_INTERNO") for row in co_values[1:] if co_value(row, "ID_INTERNO")}
+
+    saidas_by_date = defaultdict(list)
+    rows_to_import = []
+
+    for saida_row in saidas_values[1:]:
+        id_interno = saida_value(saida_row, "ID_INTERNO")
+        finance_field = saida_value(saida_row, "FINANCE")
+
+        if not finance_field.strip() and id_interno and id_interno not in existing_ids:
+            data_mov = saida_value(saida_row, "DATA")
+            saidas_by_date[data_mov].append({
+                "saida_row": saida_row,
+                "id_interno": id_interno,
+                "data_mov": data_mov,
+            })
+            rows_to_import.append(id_interno)
+
+    if not rows_to_import:
+        return {"imported": 0, "total_found": 0}
+
+    months = ("JANEIRO", "FEVEREIRO", "MARÇO", "ABRIL", "MAIO", "JUNHO",
+              "JULHO", "AGOSTO", "SETEMBRO", "OUTUBRO", "NOVEMBRO", "DEZEMBRO")
+
+    seq_by_date = defaultdict(int)
+    for co_row in co_values[1:]:
+        data_mov = co_value(co_row, "DATA MOV.")
+        desc_soma = co_value(co_row, "DESCRIÇÃO SOMA")
+        seq = extract_suffix_n(desc_soma)
+        if seq and data_mov:
+            seq_by_date[data_mov] = max(seq_by_date.get(data_mov, 0), seq)
+
+    rows_to_append = []
+    for data_mov in sorted(saidas_by_date.keys()):
+        items = saidas_by_date[data_mov]
+        next_seq = seq_by_date.get(data_mov, 0) + 1
+
+        for item in items:
+            saida_row = item["saida_row"]
+            id_interno = item["id_interno"]
+
+            descricao = saida_value(saida_row, "DESCRIÇÃO DA COMPRA")
+            valor = saida_value(saida_row, "VALOR DA COMPRA")
+            tipo = saida_value(saida_row, "TIPO")
+
+            co_row = [""] * len(co_headers)
+            mapped = {
+                "DATA MOV.": data_mov,
+                "DESCRIÇÃO": descricao,
+                "IMPORTÂNCIA": clean_amount_for_comparison(valor) if valor else "0,00",
+                "TIPO": "Saída" if not tipo or norm_basic(tipo) == "saida" else tipo,
+                "PROCESSO": "SAÍDAS",
+                "ID_INTERNO": id_interno,
+                "DESCRIÇÃO SOMA": f"{descricao} N{next_seq:03d}",
+            }
+
+            try:
+                parsed_date = datetime.strptime(data_mov, "%d/%m/%Y")
+                mapped["PERÍODO"] = months[parsed_date.month - 1]
+            except (ValueError, IndexError):
+                pass
+
+            for field, field_value in mapped.items():
+                field_idx = co_indices.get(norm_basic(field))
+                if field_idx is not None:
+                    co_row[field_idx] = field_value
+
+            rows_to_append.append(co_row)
+            next_seq += 1
+            seq_by_date[data_mov] = next_seq - 1
+
+    if rows_to_append:
+        sheets._ws.append_rows(rows_to_append, value_input_option="USER_ENTERED")
+
+    return {"imported": len(rows_to_append), "total_found": len(rows_to_import)}
+
+
 def run_round(start_date, end_date, apply_changes=False):
     orchestrator = DirectOrchestrator(Settings.from_env())
     orchestrator.auth.login()
+
+    # Etapa prévia: importar SAÍDAS com FINANCE vazio para CONTAORDEM
+    logger = logging.getLogger("soma_direct.ronda")
+    if apply_changes:
+        try:
+            logger.info("Importando SAÍDAS com FINANCE vazio para CONTAORDEM...")
+            import_saidas_result = _import_missing_saida_entries(orchestrator)
+            logger.info(f"Importacao: {import_saidas_result['imported']} linha(s) criada(s)")
+        except Exception as e:
+            logger.warning(f"Falha na importacao de SAÍDAS: {e}")
+
     all_rows = orchestrator.sheets.get_all_rows(only_entrada_saida=False)
     rows = [
         row for row in all_rows
