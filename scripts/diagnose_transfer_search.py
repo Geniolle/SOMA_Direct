@@ -35,21 +35,36 @@ def main() -> int:
         print("Falha no login")
         return 1
 
-    fmt = lambda d: d.strftime("%d/%m/%Y")
-    windows = {
-        "mesmo dia (i=f)": (fmt(day), fmt(day)),
-        "dia-1 .. dia+1": (fmt(day - timedelta(days=1)), fmt(day + timedelta(days=1))),
-        "mês inteiro": (fmt(day.replace(day=1)), fmt((day.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1))),
+    base = settings.site_base_url.rstrip("/") + "/"
+    page = http.get(base + "?mod=ivv&exec=transferencias_caixas").text
+    for name in ("vencimento_inicio", "vencimento_fim"):
+        tag = re.search(rf"<input\b[^>]*name=[\"']{name}[\"'][^>]*>", page, re.I)
+        print(f"INPUT {name}: {tag.group(0)[:250] if tag else 'não encontrado'}")
+    sel = re.search(r"<select\b[^>]*name=[\"']id_inst[\"'][^>]*>(.*?)</select>", page, re.I | re.S)
+    if sel:
+        opts = re.findall(r"<option\b([^>]*)value=[\"']([^\"']*)[\"'][^>]*>(.*?)</option>", sel.group(1), re.S)
+        print("SELECT id_inst:", [(v, " ".join(t.split()), "selected" in a) for a, v, t in opts][:10])
+    print(f"settings.institution_id = {settings.institution_id}")
+
+    fmt = lambda d, f: d.strftime(f)
+    variants = {
+        "dd/mm/aaaa dia": (fmt(day, "%d/%m/%Y"), fmt(day, "%d/%m/%Y")),
+        "mm/dd/aaaa dia": (fmt(day, "%m/%d/%Y"), fmt(day, "%m/%d/%Y")),
+        "aaaa-mm-dd dia": (fmt(day, "%Y-%m-%d"), fmt(day, "%Y-%m-%d")),
+        "dd/mm/aaaa mês": (fmt(day.replace(day=1), "%d/%m/%Y"), fmt(day.replace(day=28), "%d/%m/%Y")),
+        "vazio": ("", ""),
+        "2000..2099": ("01/01/2000", "31/12/2099"),
     }
-    for label, (start, end) in windows.items():
+    for label, (start, end) in variants.items():
         resp, transfers = query(http, settings, start, end)
         on_day = [t for t in transfers if normalize_date_str(t.data) == target]
-        print(f"\n== {label}: i={start} f={end} -> HTTP {resp.status_code}, {len(resp.text)} bytes, "
-              f"{len(re.findall(r'<tr', resp.text, re.I))} <tr>, {len(transfers)} transferências, {len(on_day)} em {target}")
-        for t in on_day:
-            print(f"   ID {t.transfer_id}: {t.caixa_origem} -> {t.caixa_destino} | {t.valor_saida} | {t.data} | obs={t.observacao!r}")
+        dates = sorted({t.data for t in transfers})
+        print(f"\n== {label}: i={start!r} f={end!r} -> {len(transfers)} transferências "
+              f"({len(on_day)} em {target}); datas: {dates[:3]} ... {dates[-3:]}")
+        for t in on_day[:6]:
+            print(f"   ID {t.transfer_id}: {t.caixa_origem} -> {t.caixa_destino} | {t.valor_saida} | {t.data}")
         if not transfers:
-            snippet = " ".join(re.sub(r"<[^>]+>", " ", resp.text).split())[:300]
+            snippet = " ".join(re.sub(r"<[^>]+>", " ", resp.text).split())[:160]
             print(f"   corpo: {snippet!r}")
     return 0
 
