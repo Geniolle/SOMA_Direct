@@ -25,6 +25,7 @@ O **SOMA Direct** é o motor de alta performance para conciliação contábil, i
   - `workflows/repasse_mvv_cli.py` & `repasse_mvv.py`: CLI interativo para execução do Repasse MVV.
 - **Documentação de Regras**:
   - `docs/REGRAS_CONCILIACAO_E_SEQUENCIAIS.md`: Regras de sequenciais diários Nxxx, resolução de origens e governança trilateral.
+  - `docs/REGRAS_TRANSFERENCIAS.md`: Como a Transferência deve ficar — mapeamento do formulário SOMA, endpoints de gravação, `Transferido` no DOC. SOMA, duplicados e execução.
 
 ---
 
@@ -39,6 +40,14 @@ O **SOMA Direct** é o motor de alta performance para conciliação contábil, i
    - Nunca sobrescrever um `DOC. SOMA` existente divergente sem confirmação.
 3. **Datas Contábeis**:
    - A data da planilha de Origem tem precedência absoluta sobre datas provisórias.
+4. **Transferências** (detalhe em `docs/REGRAS_TRANSFERENCIAS.md`):
+   - Gravar via `POST sys/app/transferencias_caixas.php` (JSON `status 1` = gravada). Nunca via a página `?mod=ivv&exec=transferencias_caixas_dados` — não grava nada.
+   - Enviar sempre `id_cc_saida`/`id_cc_entrada` (CENTRO DE CUSTO; PADRÃO = `0`), como o Selenium do projeto SOMA.
+   - Concluída → `DOC. SOMA = Transferido` na CONTAORDEM e na origem; ID da transferência em `DADOS DOC`. `TRF_#####` é inválido.
+   - Pesquisar antes de criar (data + valor + caixas); nunca usar "a primeira transferência da tabela".
+   - Entradas/Saídas seguem a mesma regra: `POST sys/app/entradas_saidas.php`, DOC. SOMA = `id` devolvido.
+5. **Execução**:
+   - Sessão única do orquestrador (`core/run_lock.py`); processar um registo de cada vez, voltar a procurar candidatos e terminar quando não houver mais.
 
 ---
 
