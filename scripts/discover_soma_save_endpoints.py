@@ -22,11 +22,10 @@ from domain.models import parse_transfer_table
 
 PAGES = {
     "TRANSFERÊNCIA": "?mod=ivv&exec=transferencias_caixas_dados",
-    "LISTA TRANSFERÊNCIAS": "?mod=ivv&exec=transferencias_caixas",
     "ENTRADAS/SAÍDAS": "?mod=ivv&exec=entradas_saidas_dados",
 }
 # Trechos de JS a mostrar por inteiro (pedido AJAX + tratamento da resposta).
-FOCUS = ("buscarTransferenciasCaixas", "sys/app/transferencias_caixas.php", "sys/app/entradas_saidas.php")
+FOCUS = ("buscarCentrodeCustoSelect", "id_cc_saida", "buscarInfoCaixas", "buscarFormaPagamento")
 KEYWORDS = re.compile(r"transfer|entradas_saidas|fluxo", re.I)
 
 
@@ -92,6 +91,14 @@ def main() -> int:
     print(f"== CONTROLO pesquisa {control_date}: {len(found)} transferência(s)")
     for t in found:
         print(f"   ID {t.transfer_id}: {t.caixa_origem} -> {t.caixa_destino} | {t.valor_saida} | {t.data}")
+
+    cc = http.post_ajax(base + "sys/post/buscarCentrodeCustoSelect.php", data={"id": settings.institution_id})
+    opts = re.findall(r"<option\b[^>]*value=[\"']([^\"']*)[\"'][^>]*>(.*?)</option>", cc.text, re.S)
+    print(f"== buscarCentrodeCustoSelect(id={settings.institution_id}): {len(opts)} opções; "
+          f"PADRÃO -> {[(v, ' '.join(t.split())) for v, t in opts if 'PADR' in t.upper()]}; primeiras: {opts[:3]}")
+    fp = http.post_ajax(base + "sys/post/buscarFormaPagamento.php", data={"id": settings.institution_id})
+    fp_opts = re.findall(r"<option\b[^>]*value=[\"']([^\"']*)[\"'][^>]*>(.*?)</option>", fp.text, re.S)
+    print(f"== buscarFormaPagamento: {fp_opts[:12]} | corpo={' '.join(fp.text.split())[:200]!r}")
 
     for label, path in PAGES.items():
         page = http.get(base + path)
