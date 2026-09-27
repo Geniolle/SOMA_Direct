@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -42,6 +43,7 @@ class SomaApiService:
         self._plano_contas_map: Dict[str, str] = {}
         self._centro_custo_map: Dict[str, str] = {}
         self._caixas_map: Dict[str, str] = {}
+        self._formas_pagamento_map: Dict[str, str] = {}
         self._loaded_catalogs = False
         self._confirmation_attempts = 5
 
@@ -88,6 +90,11 @@ class SomaApiService:
         for opt_id, opt_name in re.findall(r"""<option[^>]*value=['"](\d+)['"][^>]*>(.*?)</option>""", cx_resp.text):
             self._caixas_map[self._norm(opt_name)] = opt_id
 
+        # 4. Formas de pagamento (mesmo pedido AJAX do formulário Entradas/Saídas)
+        fp_resp = self.http.post(f"{self.base_url}sys/post/buscarFormaPagamento.php", data={"id": self.settings.institution_id})
+        for opt_id, opt_name in re.findall(r"""<option[^>]*value=['"](\d+)['"][^>]*>(.*?)</option>""", fp_resp.text, re.DOTALL | re.IGNORECASE):
+            self._formas_pagamento_map[self._norm(unescape(re.sub(r"<[^>]+>", " ", opt_name)))] = opt_id
+
         self._loaded_catalogs = True
         logger.info(f"Catálogos carregados: {len(self._plano_contas_map)} Planos, {len(self._centro_custo_map)} Centros de Custo, {len(self._caixas_map)} Caixas.")
 
@@ -118,6 +125,40 @@ class SomaApiService:
         final_url = str(getattr(resp, "url", "") or "").split("?", 1)[0]
         return f"HTTP {resp.status_code} url={final_url} corpo='{text[:300]}'"
 
+    # Endpoints de gravação usados pelo JavaScript oficial do SOMA
+    # (themes/js/entradas_saidas_dados_v2.js e transferencias_caixas_dados.js).
+    ENTRADAS_SAIDAS_ENDPOINT = "sys/app/entradas_saidas.php"
+    TRANSFERENCIAS_ENDPOINT = "sys/app/transferencias_caixas.php"
+
+    TRANSFER_STATUS_MESSAGES = {
+        2: "SOMA: nenhuma operação foi realizada",
+        5: "SOMA: o caixa não possui o valor solicitado para a transferência",
+        6: "SOMA: não é possível transferir para um mês fechado",
+        7: "SOMA: a sessão expirou",
+        11: "SOMA: a transferência tornaria o caixa negativo",
+    }
+
+    def _submit_app(self, endpoint: str, payload: Dict[str, str]) -> Tuple[Any, Optional[Dict[str, Any]]]:
+        """POST AJAX para sys/app/*.php e interpretação da resposta JSON {status, ...}."""
+        resp = self.http.post_ajax(f"{self.base_url}{endpoint}", data=payload)
+        data: Optional[Dict[str, Any]] = None
+        match = re.search(r"\{.*\}", resp.text or "", re.DOTALL)
+        if match:
+            try:
+                parsed = json.loads(match.group(0))
+                if isinstance(parsed, dict):
+                    data = parsed
+            except ValueError:
+                data = None
+        return resp, data
+
+    @staticmethod
+    def _json_status(data: Optional[Dict[str, Any]]) -> Optional[int]:
+        try:
+            return int((data or {}).get("status"))
+        except (TypeError, ValueError):
+            return None
+
     def resolve_plano_id(self, plano_name: str) -> str:
         self.load_catalogs()
         target = self._norm(plano_name)
@@ -139,9 +180,20 @@ class SomaApiService:
                 return v
         raise ValueError(f"Centro de custo não encontrado no SOMA: '{centro_name}'")
 
+    def resolve_forma_pagamento_id(self, forma_name: str) -> str:
+        self.load_catalogs()
+        target = self._norm(forma_name)
+        if target in self._formas_pagamento_map:
+            return self._formas_pagamento_map[target]
+        for k, v in self._formas_pagamento_map.items():
+            if target and (target in k or k in target):
+                return v
+        raise ValueError(f"Forma de pagamento não encontrada no SOMA: '{forma_name}'")
+
     def resolve_caixa_id(self, caixa_name: str) -> str:
         self.load_catalogs()
-        target = self._norm(caixa_name)
+        # "CAIXA ECONÔMICA MONTEPIO GERAL [CONTA CORRENTE]" -> nome do catálogo
+        target = self._norm(re.sub(r"\[.*?\]", "", caixa_name or ""))
         if target in self._caixas_map:
             return self._caixas_map[target]
         for k, v in self._caixas_map.items():
@@ -274,7 +326,7 @@ class SomaApiService:
             "data_vencimento": row.data_mov,
             "data_entrada": row.data_mov,
             "valor": clean_amount(row.importancia),
-            "forma_pagamento": "1",
+            "forma_pagamento": self.resolve_forma_pagamento_id(row.forma_pagamento),
             "id_caixa_origem": caixa_id,
             "descontos": "",
             "multa": "",
@@ -286,20 +338,22 @@ class SomaApiService:
             "add": "1"
         }
 
-        url = f"{self.base_url}?mod=app&exec=entradas_saidas&faz=dados"
-        resp = self.http.post(url, data=payload)
-        http_error = self._http_error(resp)
-        if http_error:
-            logger.error("Saída linha %s: %s | %s", row.row_number, http_error, self._describe_response(resp))
-            return OperationOutcome(False, "", "Saída", row.row_number, int((time.perf_counter() - t0) * 1000), error_message=http_error)
+        resp, data = self._submit_app(self.ENTRADAS_SAIDAS_ENDPOINT, payload)
+        status = self._json_status(data)
+        if status != 1:
+            message = f"SOMA recusou a gravação da Saída (status={status})" if status is not None else (self._http_error(resp) or "Resposta inválida do SOMA ao gravar")
+            logger.error("Saída linha %s: %s | resposta=%s | %s", row.row_number, message, data, self._describe_response(resp))
+            return OperationOutcome(False, "", "Saída", row.row_number, int((time.perf_counter() - t0) * 1000), error_message=message)
 
-        # Consulta imediatamente o DOC gerado
-        doc_id = self._wait_find_doc(tipo="0", descricao=row.descricao_soma or row.descricao, valor=row.importancia, data_mov=row.data_mov)
+        # O SOMA devolve o ID do documento (usado no link ?ID=); confirma pela pesquisa se faltar.
+        doc_id = str((data or {}).get("id") or "").strip()
+        if not re.fullmatch(r"\d{7}", doc_id):
+            doc_id = self._wait_find_doc(tipo="0", descricao=row.descricao_soma or row.descricao, valor=row.importancia, data_mov=row.data_mov) or ""
 
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
         if not doc_id:
-            logger.error("Saída linha %s não confirmada após POST: %s", row.row_number, self._describe_response(resp))
-            return OperationOutcome(False, "", "Saída", row.row_number, elapsed_ms, error_message="POST concluído, mas o documento não foi confirmado de forma inequívoca no SOMA")
+            logger.error("Saída linha %s gravada (status 1) mas sem DOC identificado: resposta=%s", row.row_number, data)
+            return OperationOutcome(False, "", "Saída", row.row_number, elapsed_ms, error_message="SOMA gravou o documento, mas o DOC não foi identificado de forma inequívoca")
 
         dados_doc = f"Registrado(a) em: {time.strftime('%d/%m/%Y %H:%M:%S')}, {row.caixa}, {row.forma_pagamento}. Baixa realizada por {self.settings.user_job_id}"
         return OperationOutcome(
@@ -330,7 +384,7 @@ class SomaApiService:
             "data_entrada": row.data_mov,
             "data_vencimento": row.data_mov,
             "valor": clean_amount(row.importancia),
-            "forma_pagamento": "1",
+            "forma_pagamento": self.resolve_forma_pagamento_id(row.forma_pagamento),
             "id_caixa_origem": caixa_id,
             "obs": row.descricao_soma or row.descricao,
             "id_moeda": "2",
@@ -339,20 +393,22 @@ class SomaApiService:
             "tipo_pagamento": "0"
         }
 
-        url = f"{self.base_url}?mod=app&exec=entradas_saidas&faz=dados"
-        resp = self.http.post(url, data=payload)
-        http_error = self._http_error(resp)
-        if http_error:
-            logger.error("Entrada linha %s: %s | %s", row.row_number, http_error, self._describe_response(resp))
-            return OperationOutcome(False, "", "Entrada", row.row_number, int((time.perf_counter() - t0) * 1000), error_message=http_error)
+        resp, data = self._submit_app(self.ENTRADAS_SAIDAS_ENDPOINT, payload)
+        status = self._json_status(data)
+        if status != 1:
+            message = f"SOMA recusou a gravação da Entrada (status={status})" if status is not None else (self._http_error(resp) or "Resposta inválida do SOMA ao gravar")
+            logger.error("Entrada linha %s: %s | resposta=%s | %s", row.row_number, message, data, self._describe_response(resp))
+            return OperationOutcome(False, "", "Entrada", row.row_number, int((time.perf_counter() - t0) * 1000), error_message=message)
 
-        doc_id = self._wait_find_doc(tipo="1", descricao=row.descricao_soma or row.descricao, valor=row.importancia, data_mov=row.data_mov)
+        # O SOMA devolve o ID do documento (usado no link ?ID=); confirma pela pesquisa se faltar.
+        doc_id = str((data or {}).get("id") or "").strip()
+        if not re.fullmatch(r"\d{7}", doc_id):
+            doc_id = self._wait_find_doc(tipo="1", descricao=row.descricao_soma or row.descricao, valor=row.importancia, data_mov=row.data_mov) or ""
 
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
-
         if not doc_id:
-            logger.error("Entrada linha %s não confirmada após POST: %s", row.row_number, self._describe_response(resp))
-            return OperationOutcome(False, "", "Entrada", row.row_number, elapsed_ms, error_message="POST concluído, mas o documento não foi confirmado de forma inequívoca no SOMA")
+            logger.error("Entrada linha %s gravada (status 1) mas sem DOC identificado: resposta=%s", row.row_number, data)
+            return OperationOutcome(False, "", "Entrada", row.row_number, elapsed_ms, error_message="SOMA gravou o documento, mas o DOC não foi identificado de forma inequívoca")
 
         dados_doc = f"Registrado(a) em: {time.strftime('%d/%m/%Y %H:%M:%S')}, {row.caixa}, {row.forma_pagamento}. Baixa realizada por {self.settings.user_job_id}"
         return OperationOutcome(
@@ -365,62 +421,65 @@ class SomaApiService:
         )
 
     def criar_transferencia(self, row: ContaOrdemRow) -> OperationOutcome:
-        """Cria Transferência diretamente pelo formulário de Transferências de Caixas."""
+        """Cria Transferência como o formulário oficial (transferencias_caixas_dados.js).
+
+        Campos iguais ao preenchimento Selenium do projeto SOMA: caixa saída/entrada,
+        centro de custo saída/entrada (CONTAORDEM[CENTRO DE CUSTO] ou PADRÃO), valor,
+        data e descrição.
+        """
         t0 = time.perf_counter()
         cx_origem = self.resolve_caixa_id(row.caixa_saida or "CAIXA DIÁRIO")
         cx_destino = self.resolve_caixa_id(row.caixa or "CAIXA ECONÓMICA MONTEPIO GERAL [CONTA CORRENTE]")
-        
+        cc_id = self.resolve_centro_custo_id((row.centro_custo or "PADRÃO").strip() or "PADRÃO")
+
         payload = {
             "id_transferencia_caixa": "",
             "aceitar_caixa_negativo": "1",
             "add": "1",
             "id_inst": self.settings.institution_id,
             "id_caixa_origem": cx_origem,
+            "id_cc_saida": cc_id,
             "valor_transferencia": clean_amount(row.importancia),
             "id_caixa_destino": cx_destino,
+            "id_cc_entrada": cc_id,
             "valor_transferencia_entrada": clean_amount(row.importancia),
             "data_transferencia": row.data_mov,
-            "obs": row.descricao_soma or row.descricao or "DEPÓSITO"
+            "obs": row.descricao_soma or row.descricao or "DEPÓSITO",
         }
 
         # Snapshot antes do POST: o ID novo é identificado por diferença, nunca
         # por "primeira transferência" da tabela.
         before_ids = {t.transfer_id for t in self.find_transfers(row)[0]}
 
-        url = f"{self.base_url}?mod=ivv&exec=transferencias_caixas_dados"
-        resp = self.http.post(url, data=payload)
-        http_error = self._http_error(resp)
-        if http_error:
-            logger.error("Transferência linha %s: %s | %s", row.row_number, http_error, self._describe_response(resp))
-            return OperationOutcome(False, "", "Transferência", row.row_number, int((time.perf_counter() - t0) * 1000), error_message=http_error)
+        resp, data = self._submit_app(self.TRANSFERENCIAS_ENDPOINT, payload)
+        status = self._json_status(data)
+        if status != 1:
+            message = self.TRANSFER_STATUS_MESSAGES.get(status) or (
+                f"SOMA recusou a transferência (status={status})" if status is not None
+                else (self._http_error(resp) or "Resposta inválida do SOMA ao gravar a transferência")
+            )
+            logger.error("Transferência linha %s: %s | resposta=%s | %s", row.row_number, message, data, self._describe_response(resp))
+            return OperationOutcome(False, "", "Transferência", row.row_number, int((time.perf_counter() - t0) * 1000), error_message=message)
 
-        new_exact: List[SomaTransfer] = []
-        new_any: List[SomaTransfer] = []
+        # Gravação confirmada pelo SOMA (status 1). Identifica o ID para DADOS DOC.
+        new_ids: List[str] = []
         for attempt in range(self._confirmation_attempts):
-            same_amount, exact = self.find_transfers(row)
-            new_any = [t for t in same_amount if t.transfer_id not in before_ids]
-            new_exact = [t for t in exact if t.transfer_id not in before_ids]
-            if new_any:
+            _, exact = self.find_transfers(row)
+            new_ids = [t.transfer_id for t in exact if t.transfer_id not in before_ids]
+            if new_ids:
                 break
             if attempt < self._confirmation_attempts - 1:
                 time.sleep(1)
 
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
-        if len(new_exact) != 1 or len(new_any) != 1:
-            if not new_any:
-                logger.error("Transferência linha %s não confirmada após POST: %s", row.row_number, self._describe_response(resp))
-                message = "POST concluído, mas a transferência não foi localizada no SOMA"
-            else:
-                ids = ", ".join(t.transfer_id for t in new_any)
-                message = f"Transferência não confirmada de forma inequívoca no SOMA (novos IDs: {ids})"
-            return OperationOutcome(False, "", "Transferência", row.row_number, elapsed_ms, error_message=message)
-
-        transfer_id = new_exact[0].transfer_id
+        if len(new_ids) != 1:
+            logger.warning("Transferência linha %s gravada (status 1) mas ID não identificado (novos: %s)", row.row_number, new_ids)
+        ref = f"Transferência {new_ids[0]}" if len(new_ids) == 1 else "Transferência"
         return OperationOutcome(
             success=True,
             doc_id=TRANSFER_DOC_MARKER,
             tipo="Transferência",
             row_number=row.row_number,
             elapsed_ms=elapsed_ms,
-            dados_doc=f"Transferência {transfer_id} de {row.caixa_saida} para {row.caixa} registada no SOMA.",
+            dados_doc=f"{ref} de {row.caixa_saida} para {row.caixa} registada no SOMA.",
         )
