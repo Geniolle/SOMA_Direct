@@ -1,11 +1,9 @@
 import argparse
 import calendar
-import html
 import logging
 import re
 import sys
 from collections import Counter, defaultdict
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -23,19 +21,12 @@ from domain.models import (
     norm_basic,
     normalize_date_str,
     normalize_document_value,
+    normalize_transfer_caixa,
+    parse_transfer_table,
+    transfer_key,
+    SomaTransfer,
 )
 from workflows.orchestrator import DirectOrchestrator
-
-
-@dataclass(frozen=True)
-class SomaTransfer:
-    transfer_id: str
-    caixa_origem: str
-    valor_saida: str
-    caixa_destino: str
-    valor_entrada: str
-    data: str
-    observacao: str = ""
 
 
 def progress_text(current: int, total: int) -> str:
@@ -88,57 +79,6 @@ def row_date_in_interval(value, start_date, end_date):
 
 def is_round_movement(row) -> bool:
     return is_entrada_ou_saida(row.tipo) or row.tipo == TipoMovimento.TRANSFERENCIA
-
-
-def normalize_transfer_caixa(value) -> str:
-    caixa = clean_caixa(value)
-    caixa = re.sub(r"\s*-?\s*\b(?:cc|conta corrente)\b\s*$", "", caixa)
-    return caixa.strip(" -")
-
-
-def transfer_key(data, valor, caixa_origem, caixa_destino):
-    return (
-        normalize_date_str(data),
-        clean_amount_for_comparison(valor),
-        normalize_transfer_caixa(caixa_origem),
-        normalize_transfer_caixa(caixa_destino),
-    )
-
-
-def parse_transfer_table(page_text: str):
-    transfers = []
-    for raw_row in re.findall(r"<tr\b[^>]*>(.*?)</tr>", page_text, re.I | re.S):
-        id_match = re.search(
-            r'class=["\'][^"\']*\bbnt_excluir\b[^"\']*["\'][^>]*\bid=["\'](\d+)["\']',
-            raw_row,
-            re.I,
-        )
-        if not id_match:
-            continue
-        cells = []
-        for raw_cell in re.findall(r"<td\b[^>]*>(.*?)</td>", raw_row, re.I | re.S):
-            cell_text = html.unescape(re.sub(r"<[^>]+>", " ", raw_cell))
-            cells.append(" ".join(cell_text.split()))
-        if len(cells) < 5:
-            continue
-        origin, amount_out, destination, amount_in, date = cells[-5:]
-        obs_match = re.search(
-            r'class=["\'][^"\']*\bbtn_obs\b[^"\']*["\'][^>]*\bdata-dados=["\']([^"\']*)["\']',
-            raw_row,
-            re.I,
-        )
-        transfers.append(
-            SomaTransfer(
-                transfer_id=id_match.group(1),
-                caixa_origem=origin,
-                valor_saida=amount_out,
-                caixa_destino=destination,
-                valor_entrada=amount_in,
-                data=date,
-                observacao=html.unescape(obs_match.group(1)) if obs_match else "",
-            )
-        )
-    return transfers
 
 
 def load_soma_transfers_interval(orchestrator, start_date, end_date):

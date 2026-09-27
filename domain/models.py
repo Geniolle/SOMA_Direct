@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -227,7 +228,7 @@ class ContaOrdemRow:
             descricao_soma=str(raw.get("DESCRIÇÃO SOMA") or raw.get("descricao_soma") or "").strip(),
             forma_pagamento=str(raw.get("FORMA DE PAGAMENTO") or raw.get("forma_pagamento") or "").strip(),
             caixa=str(raw.get("CAIXA") or raw.get("caixa") or "").strip(),
-            caixa_saida=str(raw.get("CAIXA SAIDA") or raw.get("caixa_saida") or "").strip(),
+            caixa_saida=str(raw.get("CAIXA SAÍDA") or raw.get("CAIXA SAIDA") or raw.get("caixa_saida") or "").strip(),
             id_interno=str(raw.get("ID_INTERNO") or raw.get("id_interno") or "").strip(),
             processo=str(raw.get("PROCESSO") or raw.get("processo") or "").strip(),
             status=str(raw.get("STATUS") or raw.get("status") or "").strip(),
@@ -285,3 +286,70 @@ class CascadeAuditOutcome:
     dados_doc: str = ""
     notes: str = ""
 
+
+
+@dataclass(frozen=True)
+class SomaTransfer:
+    transfer_id: str
+    caixa_origem: str
+    valor_saida: str
+    caixa_destino: str
+    valor_entrada: str
+    data: str
+    observacao: str = ""
+
+
+def normalize_transfer_caixa(value: Any) -> str:
+    caixa = clean_caixa(value)
+    caixa = re.sub(r"\s*-?\s*\b(?:cc|conta corrente)\b\s*$", "", caixa)
+    return caixa.strip(" -")
+
+
+def transfer_key(data: Any, valor: Any, caixa_origem: Any, caixa_destino: Any) -> Tuple[str, str, str, str]:
+    return (
+        normalize_date_str(data),
+        clean_amount_for_comparison(valor),
+        normalize_transfer_caixa(caixa_origem),
+        normalize_transfer_caixa(caixa_destino),
+    )
+
+
+def parse_transfer_table(page_text: str) -> List[SomaTransfer]:
+    """Lê a tabela devolvida por sys/post/buscarTransferenciasCaixas.php.
+
+    O ID de cada transferência vem do botão de exclusão (``bnt_excluir``);
+    as cinco últimas células são origem, valor saída, destino, valor entrada, data.
+    """
+    transfers = []
+    for raw_row in re.findall(r"<tr\b[^>]*>(.*?)</tr>", page_text or "", re.I | re.S):
+        id_match = re.search(
+            r'class=["\'][^"\']*\bbnt_excluir\b[^"\']*["\'][^>]*\bid=["\'](\d+)["\']',
+            raw_row,
+            re.I,
+        )
+        if not id_match:
+            continue
+        cells = []
+        for raw_cell in re.findall(r"<td\b[^>]*>(.*?)</td>", raw_row, re.I | re.S):
+            cell_text = html.unescape(re.sub(r"<[^>]+>", " ", raw_cell))
+            cells.append(" ".join(cell_text.split()))
+        if len(cells) < 5:
+            continue
+        origin, amount_out, destination, amount_in, date = cells[-5:]
+        obs_match = re.search(
+            r'class=["\'][^"\']*\bbtn_obs\b[^"\']*["\'][^>]*\bdata-dados=["\']([^"\']*)["\']',
+            raw_row,
+            re.I,
+        )
+        transfers.append(
+            SomaTransfer(
+                transfer_id=id_match.group(1),
+                caixa_origem=origin,
+                valor_saida=amount_out,
+                caixa_destino=destination,
+                valor_entrada=amount_in,
+                data=date,
+                observacao=html.unescape(obs_match.group(1)) if obs_match else "",
+            )
+        )
+    return transfers

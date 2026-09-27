@@ -48,8 +48,12 @@ class DirectOrchestrator:
         self.audit_service = AuditService(self.settings, self.http, self.sheets)
 
     def initialize(self) -> bool:
-        """Autentica na sessão HTTP e carrega catálogos de apoio."""
-        if not self.auth.login():
+        """Autentica na sessão HTTP e carrega catálogos de apoio.
+
+        O agendador reutiliza o mesmo orquestrador indefinidamente; a sessão PHP
+        do SOMA expira, pelo que cada ronda renova o login explicitamente.
+        """
+        if not self.auth.login(force=True):
             raise RuntimeError("Não foi possível autenticar no SOMA.")
         self.api.load_catalogs()
         return True
@@ -154,9 +158,9 @@ class DirectOrchestrator:
         # 1. Pesquisa preventiva: diferentes estratégias por tipo
         # Transferências são identificadas por valor+data, não por descrição
         if row.tipo == TipoMovimento.TRANSFERENCIA:
-            existing_id = self.api._find_transfer_id(valor=row.importancia, data_mov=row.data_mov)
-            if existing_id:
-                doc_id = f"TRF_{existing_id}"
+            same_amount, exact = self.api.find_transfers(row)
+            if len(exact) == 1 and len(same_amount) == 1:
+                doc_id = f"TRF_{exact[0].transfer_id}"
                 logger.info(f"-> Transferência já existe no SOMA (ID {doc_id}). Atualizando planilha...")
                 self.sheets.mark_row_completed(
                     row_idx=row.row_number,
@@ -174,6 +178,17 @@ class DirectOrchestrator:
                     elapsed_ms=0,
                     dados_doc="Transferência já existe"
                 )
+            if same_amount:
+                # Existe(m) transferência(s) com a mesma data e valor que não
+                # correspondem de forma inequívoca: nunca criar outra às cegas.
+                ids = ", ".join(t.transfer_id for t in same_amount)
+                message = (
+                    f"Transferência(s) no SOMA com a mesma data e valor sem correspondência "
+                    f"inequívoca de caixas (IDs: {ids})"
+                )
+                logger.error("Linha %s: %s", row.row_number, message)
+                self.sheets.mark_row_validation_error(row.row_number, message)
+                return OperationOutcome(False, "Analisar", row.tipo.value, row.row_number, 0, error_message=message)
             # Transferência nova: prosseguir para criação
             candidates = []
         else:

@@ -21,8 +21,9 @@ class DuplicateChecker:
         data_mov = row.data_mov
 
         if row.tipo == TipoMovimento.TRANSFERENCIA:
-            existing_id = self.api._find_transfer_id(valor=valor, data_mov=data_mov)
-            if existing_id:
+            _, exact = self.api.find_transfers(row)
+            if len(exact) == 1:
+                existing_id = exact[0].transfer_id
                 logger.info(f"Linha {row.row_number}: Transferencia ja existente no SOMA (ID {existing_id}).")
                 return f"TRF_{existing_id}"
         else:

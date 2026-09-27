@@ -5,10 +5,20 @@ import re
 import time
 import unicodedata
 from html import unescape
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from config.settings import Settings
 from core.http_session import ResilientSession
-from domain.models import ContaOrdemRow, OperationOutcome, TipoMovimento, norm_basic
+from domain.models import (
+    ContaOrdemRow,
+    OperationOutcome,
+    SomaTransfer,
+    TipoMovimento,
+    clean_amount_for_comparison,
+    norm_basic,
+    normalize_date_str,
+    parse_transfer_table,
+    transfer_key,
+)
 
 logger = logging.getLogger("soma_direct.service")
 
@@ -84,15 +94,28 @@ class SomaApiService:
         s2 = unicodedata.normalize("NFKD", (s or ""))
         return "".join(c for c in s2 if not unicodedata.combining(c)).strip().lower()
 
-    @staticmethod
-    def _http_error(resp: Any) -> Optional[str]:
+    # Palavras inteiras apenas: "erro" não pode casar com "error"/"onerror"
+    # presentes no HTML/JS de qualquer página devolvida pelo SOMA.
+    _ERROR_MARKERS = re.compile(
+        r"\b(?:erro|falha|nao foi possivel|acesso negado)\b"
+    )
+
+    @classmethod
+    def _http_error(cls, resp: Any) -> Optional[str]:
         if not 200 <= resp.status_code < 300:
             return f"HTTP {resp.status_code} devolvido pelo SOMA"
-        body = norm_basic(resp.text)
-        error_markers = ("erro", "falha", "não foi possível", "nao foi possivel", "acesso negado")
-        if any(marker in body for marker in error_markers):
+        body = norm_basic(re.sub(r"<script\b.*?</script>", " ", resp.text or "", flags=re.S | re.I))
+        if cls._ERROR_MARKERS.search(body):
             return "O SOMA devolveu uma mensagem de erro ao gravar o documento"
         return None
+
+    @staticmethod
+    def _describe_response(resp: Any) -> str:
+        """Resumo não sensível da resposta HTTP para diagnóstico em log."""
+        text = re.sub(r"<script\b.*?</script>|<style\b.*?</style>", " ", resp.text or "", flags=re.S | re.I)
+        text = " ".join(unescape(re.sub(r"<[^>]+>", " ", text)).split())
+        final_url = str(getattr(resp, "url", "") or "").split("?", 1)[0]
+        return f"HTTP {resp.status_code} url={final_url} corpo='{text[:300]}'"
 
     def resolve_plano_id(self, plano_name: str) -> str:
         self.load_catalogs()
@@ -188,24 +211,37 @@ class SomaApiService:
             logger.error("Busca ambígua no SOMA: %d documentos correspondem aos mesmos campos.", len(unique))
         return None
 
-    def _find_transfer_id(self, valor: str, data_mov: str) -> Optional[str]:
-        """Consulta buscarTransferenciasCaixas.php e retorna o ID da transferência."""
-        # Usar intervalo largo para cobrir transferências de qualquer ano
+    def list_transfers_on(self, data_mov: str) -> List[SomaTransfer]:
+        """Lista as transferências de caixas do SOMA numa única data."""
+        d_norm = normalize_date_str(data_mov)
+        if not d_norm:
+            return []
         resp = self.http.post_ajax(f"{self.base_url}sys/post/buscarTransferenciasCaixas.php", data={
             "id_inst": self.settings.institution_id,
-            "i": "01/01/2000",
-            "f": "31/12/2099"
+            "i": d_norm,
+            "f": d_norm,
         })
-        clean_val = clean_amount(valor)
-        for rw in re.findall(r'<tr\b[^>]*>(.*?)</tr>', resp.text, re.DOTALL):
-            if clean_val in rw and data_mov in rw:
-                m = re.search(r'value=["\'](\d+)["\']', rw) or re.search(r'id=["\'](\d+)["\']', rw)
-                if m:
-                    return m.group(1)
-        m = re.search(r'class="[^"]*selectable-item[^"]*"[^>]*value=["\'](\d+)["\']', resp.text)
-        if m:
-            return m.group(1)
-        return None
+        if not 200 <= resp.status_code < 300:
+            raise RuntimeError(f"Falha ao pesquisar transferências no SOMA: HTTP {resp.status_code}")
+        return [t for t in parse_transfer_table(resp.text) if normalize_date_str(t.data) == d_norm]
+
+    def find_transfers(self, row: ContaOrdemRow) -> Tuple[List[SomaTransfer], List[SomaTransfer]]:
+        """Devolve (mesma data+valor, mesma data+valor+caixas) para a linha.
+
+        O primeiro conjunto serve de guarda anti-duplicado: qualquer transferência
+        com a mesma data e valor bloqueia uma criação automática.
+        """
+        valor = clean_amount_for_comparison(row.importancia)
+        same_amount = [
+            t for t in self.list_transfers_on(row.data_mov)
+            if clean_amount_for_comparison(t.valor_saida) == valor
+        ]
+        key = transfer_key(row.data_mov, row.importancia, row.caixa_saida, row.caixa)
+        exact = [
+            t for t in same_amount
+            if transfer_key(t.data, t.valor_saida, t.caixa_origem, t.caixa_destino) == key
+        ]
+        return same_amount, exact
 
     def _wait_find_doc(self, tipo: str, descricao: str, valor: str, data_mov: str) -> Optional[str]:
         """Aguarda a consistência do índice de pesquisa após a criação."""
@@ -253,6 +289,7 @@ class SomaApiService:
         resp = self.http.post(url, data=payload)
         http_error = self._http_error(resp)
         if http_error:
+            logger.error("Saída linha %s: %s | %s", row.row_number, http_error, self._describe_response(resp))
             return OperationOutcome(False, "", "Saída", row.row_number, int((time.perf_counter() - t0) * 1000), error_message=http_error)
 
         # Consulta imediatamente o DOC gerado
@@ -260,6 +297,7 @@ class SomaApiService:
 
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
         if not doc_id:
+            logger.error("Saída linha %s não confirmada após POST: %s", row.row_number, self._describe_response(resp))
             return OperationOutcome(False, "", "Saída", row.row_number, elapsed_ms, error_message="POST concluído, mas o documento não foi confirmado de forma inequívoca no SOMA")
 
         dados_doc = f"Registrado(a) em: {time.strftime('%d/%m/%Y %H:%M:%S')}, {row.caixa}, {row.forma_pagamento}. Baixa realizada por {self.settings.user_job_id}"
@@ -304,6 +342,7 @@ class SomaApiService:
         resp = self.http.post(url, data=payload)
         http_error = self._http_error(resp)
         if http_error:
+            logger.error("Entrada linha %s: %s | %s", row.row_number, http_error, self._describe_response(resp))
             return OperationOutcome(False, "", "Entrada", row.row_number, int((time.perf_counter() - t0) * 1000), error_message=http_error)
 
         doc_id = self._wait_find_doc(tipo="1", descricao=row.descricao_soma or row.descricao, valor=row.importancia, data_mov=row.data_mov)
@@ -311,6 +350,7 @@ class SomaApiService:
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
 
         if not doc_id:
+            logger.error("Entrada linha %s não confirmada após POST: %s", row.row_number, self._describe_response(resp))
             return OperationOutcome(False, "", "Entrada", row.row_number, elapsed_ms, error_message="POST concluído, mas o documento não foi confirmado de forma inequívoca no SOMA")
 
         dados_doc = f"Registrado(a) em: {time.strftime('%d/%m/%Y %H:%M:%S')}, {row.caixa}, {row.forma_pagamento}. Baixa realizada por {self.settings.user_job_id}"
@@ -342,20 +382,39 @@ class SomaApiService:
             "obs": row.descricao_soma or row.descricao or "DEPÓSITO"
         }
 
+        # Snapshot antes do POST: o ID novo é identificado por diferença, nunca
+        # por "primeira transferência" da tabela.
+        before_ids = {t.transfer_id for t in self.find_transfers(row)[0]}
+
         url = f"{self.base_url}?mod=ivv&exec=transferencias_caixas_dados"
         resp = self.http.post(url, data=payload)
         http_error = self._http_error(resp)
         if http_error:
+            logger.error("Transferência linha %s: %s | %s", row.row_number, http_error, self._describe_response(resp))
             return OperationOutcome(False, "", "Transferência", row.row_number, int((time.perf_counter() - t0) * 1000), error_message=http_error)
 
-        doc_id = self._find_transfer_id(valor=row.importancia, data_mov=row.data_mov)
-        if not doc_id:
-            return OperationOutcome(False, "", "Transferência", row.row_number, int((time.perf_counter() - t0) * 1000), error_message="Transferência não confirmada no SOMA")
-        else:
-            doc_id = f"TRF_{doc_id}"
+        new_exact: List[SomaTransfer] = []
+        new_any: List[SomaTransfer] = []
+        for attempt in range(self._confirmation_attempts):
+            same_amount, exact = self.find_transfers(row)
+            new_any = [t for t in same_amount if t.transfer_id not in before_ids]
+            new_exact = [t for t in exact if t.transfer_id not in before_ids]
+            if new_any:
+                break
+            if attempt < self._confirmation_attempts - 1:
+                time.sleep(1)
 
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
+        if len(new_exact) != 1 or len(new_any) != 1:
+            if not new_any:
+                logger.error("Transferência linha %s não confirmada após POST: %s", row.row_number, self._describe_response(resp))
+                message = "POST concluído, mas a transferência não foi localizada no SOMA"
+            else:
+                ids = ", ".join(t.transfer_id for t in new_any)
+                message = f"Transferência não confirmada de forma inequívoca no SOMA (novos IDs: {ids})"
+            return OperationOutcome(False, "", "Transferência", row.row_number, elapsed_ms, error_message=message)
 
+        doc_id = f"TRF_{new_exact[0].transfer_id}"
         return OperationOutcome(
             success=True,
             doc_id=doc_id,
