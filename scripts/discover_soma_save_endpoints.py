@@ -22,9 +22,25 @@ from domain.models import parse_transfer_table
 
 PAGES = {
     "TRANSFERÊNCIA": "?mod=ivv&exec=transferencias_caixas_dados",
+    "LISTA TRANSFERÊNCIAS": "?mod=ivv&exec=transferencias_caixas",
     "ENTRADAS/SAÍDAS": "?mod=ivv&exec=entradas_saidas_dados",
 }
+# Trechos de JS a mostrar por inteiro (pedido AJAX + tratamento da resposta).
+FOCUS = ("buscarTransferenciasCaixas", "sys/app/transferencias_caixas.php", "sys/app/entradas_saidas.php")
 KEYWORDS = re.compile(r"transfer|entradas_saidas|fluxo", re.I)
+
+
+def show_hidden_inputs(html: str) -> None:
+    for tag in re.findall(r"<input\b[^>]*type=[\"']hidden[\"'][^>]*>", html, re.I):
+        name = re.search(r"name=[\"']([^\"']+)", tag)
+        value = re.search(r"value=[\"']([^\"']*)", tag)
+        if name and name.group(1) not in ("email",):
+            print(f"   HIDDEN {name.group(1)}={value.group(1) if value else ''!r}")
+    for sel in ("id_caixa_origem", "id_caixa_destino"):
+        m = re.search(rf"<select\b[^>]*name=[\"']{sel}[\"'][^>]*>(.*?)</select>", html, re.I | re.S)
+        if m:
+            opts = re.findall(r"<option\b[^>]*value=[\"']([^\"']*)[\"'][^>]*>(.*?)</option>", m.group(1), re.S)
+            print(f"   SELECT {sel}: {[(v, ' '.join(t.split())) for v, t in opts][:8]}")
 
 
 def describe_form(html: str) -> None:
@@ -55,10 +71,10 @@ def scan_js(http, base: str, html: str) -> None:
         if not hits:
             continue
         print(f"   {label}: endpoints -> {', '.join(sorted(hits))}")
-        for m in re.finditer(r"(sys/)?app/[A-Za-z0-9_]*(transfer|entradas_saidas|fluxo)[A-Za-z0-9_]*\.php", js, re.I):
-            ctx = " ".join(js[max(0, m.start() - 250): m.end() + 350].split())
-            print(f"      ...{ctx[:600]}...")
-            break
+        for key in FOCUS:
+            for m in list(re.finditer(re.escape(key), js))[:3]:
+                ctx = " ".join(js[max(0, m.start() - 900): m.end() + 1400].split())
+                print(f"      [{key}] ...{ctx}...")
 
 
 def main() -> int:
@@ -81,6 +97,7 @@ def main() -> int:
         page = http.get(base + path)
         print(f"\n== {label}: GET {path} -> HTTP {page.status_code}, url final={page.url.split('?')[0]}, {len(page.text)} bytes")
         describe_form(page.text)
+        show_hidden_inputs(page.text)
         scan_js(http, page.url, page.text)
     return 0
 
