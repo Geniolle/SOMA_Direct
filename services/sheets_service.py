@@ -626,7 +626,6 @@ class GoogleSheetsService:
             ("DOC. SOMA", doc_id),
             ("LINK", link_formula),
             ("STATUS", "VALIDADO"),
-            ("AUDITORIA", "Confirmado"),
             ("IDUSER", self.settings.user_job_id),
             ("TIMESTAMP", now_str),
         ]
@@ -728,7 +727,6 @@ class GoogleSheetsService:
         updates = []
         for name, value in (
             ("STATUS", "EM ERRO"),
-            ("AUDITORIA", str(message)[:450]),
             ("DADOS DOC", str(message)[:450]),
         ):
             col = header_map.get(norm_basic(name))
@@ -745,7 +743,6 @@ class GoogleSheetsService:
         for name, value in (
             ("DOC. SOMA", "Analisar"),
             ("STATUS", "ERRO"),
-            ("AUDITORIA", str(message)[:450]),
             ("DADOS DOC", str(message)[:450]),
         ):
             col = header_map.get(norm_basic(name))
@@ -762,7 +759,6 @@ class GoogleSheetsService:
         for name, value in (
             ("DOC. SOMA", "Analisar"),
             ("STATUS", "Duplicidade"),
-            ("AUDITORIA", f"Duplicidade: pesquisa encontrou {count} registros no SOMA"),
             ("DADOS DOC", f"Pesquisa preventiva encontrou {count} registros no SOMA"),
         ):
             col = header_map.get(norm_basic(name))
@@ -778,9 +774,8 @@ class GoogleSheetsService:
         new_doc: Optional[str] = None,
         new_desc: Optional[str] = None,
         dados_doc: Optional[str] = None,
-        status: Optional[str] = None,
     ) -> None:
-        """Atualiza os campos de auditoria de uma linha individualmente."""
+        """Atualiza os campos de auditoria de uma linha individualmente (não alterar STATUS)."""
         headers = self.get_headers()
         header_map = {h.strip(): i + 1 for i, h in enumerate(headers)}
 
@@ -791,8 +786,6 @@ class GoogleSheetsService:
             cells_to_update.append(("DESCRIÇÃO SOMA", new_desc))
         if dados_doc is not None:
             cells_to_update.append(("DADOS DOC", dados_doc))
-        if status is not None:
-            cells_to_update.append(("STATUS", status))
 
         data_to_batch = []
         for col_name, val in cells_to_update:
@@ -834,8 +827,6 @@ class GoogleSheetsService:
                 cells.append(("DATA MOV.", upd["new_data"]))
             if upd.get("dados_doc") is not None:
                 cells.append(("DADOS DOC", upd["dados_doc"]))
-            if upd.get("status") is not None:
-                cells.append(("STATUS", upd["status"]))
             if upd.get("new_caixa") is not None:
                 cells.append(("CAIXA", upd["new_caixa"]))
             if upd.get("new_forma_pagamento") is not None:
@@ -946,9 +937,8 @@ class GoogleSheetsService:
 
                     if cur_doc.isdigit():
                         if cur_doc in seen_docs:
-                            # DOC duplicado neste grupo! Limpa DOC. SOMA, STATUS, AUDITORIA e DADOS DOC
+                            # DOC duplicado neste grupo! Limpa DOC. SOMA, AUDITORIA e DADOS DOC (preservar STATUS)
                             row_upd["new_doc"] = ""
-                            row_upd["status"] = ""
                             row_upd["auditoria"] = ""
                             row_upd["dados_doc"] = ""
                             total_docs_cleared += 1

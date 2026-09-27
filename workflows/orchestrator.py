@@ -381,7 +381,6 @@ class DirectOrchestrator:
             outcome = self.audit_service.audit_row(row)
             outcomes.append(outcome)
 
-            status_str = "ERRO" if outcome.inconsistent and "DADOS DOC" in "; ".join(outcome.inconsistencies) else None
             aud_str = (
                 "Confirmado"
                 if outcome.confirmed or outcome.corrected
@@ -394,7 +393,6 @@ class DirectOrchestrator:
                 "new_doc": outcome.new_doc,
                 "new_desc": outcome.new_desc,
                 "dados_doc": outcome.dados_doc if outcome.dados_doc != row.dados_doc else None,
-                "status": status_str,
             })
 
         if not dry_run and updates:
@@ -470,7 +468,6 @@ class DirectOrchestrator:
                     "row_idx": row.row_number,
                     "new_doc": doc,
                     "new_desc": item.descricao,
-                    "status": "VALIDADO",
                     "auditoria": "Confirmado",
                     "dados_doc": dados or row.dados_doc,
                 })
@@ -480,7 +477,6 @@ class DirectOrchestrator:
                 updates.append({
                     "row_idx": row.row_number,
                     "new_doc": "Analisar",
-                    "status": "Duplicidade",
                     "auditoria": f"Duplicidade: {len(valid)} candidato(s) inequívoco(s)",
                 })
                 unresolved += 1

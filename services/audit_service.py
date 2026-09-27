@@ -768,7 +768,6 @@ class AuditService:
                     aud_str = "Confirmado"
                 else:
                     stats["inconsistent"] += 1
-                    status_str = "ERRO" if "DADOS DOC" in "; ".join(outcome.inconsistencies) else None
                     aud_str = "; ".join(outcome.inconsistencies) or "Registo não confirmado no SOMA"
 
                 updates_buffer.append({
@@ -777,7 +776,6 @@ class AuditService:
                     "new_doc": outcome.new_doc,
                     "new_desc": outcome.new_desc,
                     "dados_doc": outcome.dados_doc if outcome.dados_doc != row.dados_doc else None,
-                    "status": status_str,
                 })
 
                 elapsed_ms = int((time.perf_counter() - t_row) * 1000)
@@ -789,7 +787,6 @@ class AuditService:
                 updates_buffer.append({
                     "row_idx": row.row_number,
                     "auditoria": f"Erro técnico: {type(e).__name__}: {e}"[:450],
-                    "status": "ERRO",
                 })
 
             # Batch update a cada batch_size linhas
@@ -933,7 +930,6 @@ class AuditService:
                     aud_text = self.get_detailed_inconsistency_message(row)
                     new_doc = None
                     new_desc = None
-                    status_str = "ERRO" if ("DADOS DOC" in aud_text or "CAIXA" in aud_text or "FORMA" in aud_text) else None
 
                 updates_buffer.append({
                     "row_idx": row.row_number,
@@ -941,7 +937,6 @@ class AuditService:
                     "new_doc": new_doc,
                     "new_desc": new_desc,
                     "dados_doc": outcome.dados_doc if outcome.dados_doc and outcome.dados_doc != row.dados_doc else None,
-                    "status": status_str,
                 })
 
                 elapsed_ms = int((time.perf_counter() - t_row) * 1000)
@@ -953,7 +948,6 @@ class AuditService:
                 updates_buffer.append({
                     "row_idx": row.row_number,
                     "auditoria": f"Erro técnico: {type(e).__name__}: {e}"[:450],
-                    "status": "ERRO",
                 })
 
             if update_sheet and len(updates_buffer) >= batch_size:
