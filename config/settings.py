@@ -35,6 +35,9 @@ class Settings:
     verify_tls: bool = True
     claim_stale_seconds: int = 900
     reconciliation_interval_seconds: int = 3600
+    # Lançamentos por ronda do agendador: 1 = um registo de cada vez (não
+    # sobrecarregar o SOMA). 0 = sem limite.
+    max_rows_per_cycle: int = 1
 
     # Pós-processos (portados do legado C:\workspace\SOMA): saldos de Caixas/Bancos
     # e relatório da sheet SOMA. Default False até serem validados em produção.
@@ -78,6 +81,7 @@ class Settings:
             verify_tls=os.getenv("VERIFY_TLS", "true").strip().lower() not in ("0", "false", "no"),
             claim_stale_seconds=int(os.getenv("CLAIM_STALE_SECONDS", "900") or 900),
             reconciliation_interval_seconds=int(os.getenv("RECONCILIATION_INTERVAL_SECONDS", "3600") or 3600),
+            max_rows_per_cycle=int(os.getenv("MAX_ROWS_PER_CYCLE", "1") or 0),
             run_caixas_bancos=os.getenv("RUN_CAIXAS_BANCOS", "false").strip().lower() in ("1", "true", "yes"),
             run_soma_sheet=os.getenv("RUN_SOMA_SHEET", "false").strip().lower() in ("1", "true", "yes"),
         )

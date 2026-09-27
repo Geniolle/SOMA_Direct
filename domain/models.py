@@ -18,6 +18,11 @@ class TipoMovimento(str, Enum):
     OUTRO = "Outro"
 
 
+# Valor gravado em DOC. SOMA (CONTAORDEM e origem) quando uma transferência
+# fica concluída no SOMA. O ID da transferência fica registado em DADOS DOC.
+TRANSFER_DOC_MARKER = "Transferido"
+
+
 PROCESSABLE_TYPES = {
     TipoMovimento.ENTRADA,
     TipoMovimento.SAIDA,

@@ -14,6 +14,7 @@ from gspread.utils import ValueInputOption, ValueRenderOption
 
 from config.settings import Settings
 from domain.models import (
+    TRANSFER_DOC_MARKER,
     ContaOrdemRow,
     TipoMovimento,
     is_entrada_ou_saida,
@@ -592,9 +593,12 @@ class GoogleSheetsService:
     ) -> None:
         """Atualiza primeiro a origem e depois conclui a linha na CONTAORDEM."""
         doc_id = str(doc_id or "").strip()
-        # Aceita: 7 dígitos (Entrada/Saída) ou TRF_##### (Transferência)
-        if not re.fullmatch(r"(\d{7}|TRF_\d+)", doc_id):
-            raise ValueError("DOC. SOMA deve conter exatamente 7 dígitos numéricos ou formato TRF_#####")
+        # Aceita: 7 dígitos (Entrada/Saída) ou "Transferido" (Transferência)
+        is_transfer = doc_id == TRANSFER_DOC_MARKER
+        if not is_transfer and not re.fullmatch(r"\d{7}", doc_id):
+            raise ValueError(
+                f"DOC. SOMA deve conter exatamente 7 dígitos numéricos ou '{TRANSFER_DOC_MARKER}'"
+            )
         if not processo or not id_interno:
             try:
                 row_data = self.get_row(row_idx)
@@ -622,9 +626,10 @@ class GoogleSheetsService:
             f"?mod=ivv&exec=entradas_saidas_dados&ID={doc_id}"
         )
         link_formula = f'=HYPERLINK("{soma_url}";"ACESSAR SOMA")'
-        cells_to_update = [
-            ("DOC. SOMA", doc_id),
-            ("LINK", link_formula),
+        cells_to_update = [("DOC. SOMA", doc_id)]
+        if not is_transfer:
+            cells_to_update.append(("LINK", link_formula))
+        cells_to_update += [
             ("STATUS", "VALIDADO"),
             ("IDUSER", self.settings.user_job_id),
             ("TIMESTAMP", now_str),

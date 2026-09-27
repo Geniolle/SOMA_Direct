@@ -12,6 +12,7 @@ from domain.models import (
     ContaOrdemRow,
     OperationOutcome,
     SomaTransfer,
+    TRANSFER_DOC_MARKER,
     TipoMovimento,
     clean_amount_for_comparison,
     norm_basic,
@@ -414,12 +415,12 @@ class SomaApiService:
                 message = f"Transferência não confirmada de forma inequívoca no SOMA (novos IDs: {ids})"
             return OperationOutcome(False, "", "Transferência", row.row_number, elapsed_ms, error_message=message)
 
-        doc_id = f"TRF_{new_exact[0].transfer_id}"
+        transfer_id = new_exact[0].transfer_id
         return OperationOutcome(
             success=True,
-            doc_id=doc_id,
+            doc_id=TRANSFER_DOC_MARKER,
             tipo="Transferência",
             row_number=row.row_number,
             elapsed_ms=elapsed_ms,
-            dados_doc=f"Transferência de {row.caixa_saida} para {row.caixa} realizada com sucesso."
+            dados_doc=f"Transferência {transfer_id} de {row.caixa_saida} para {row.caixa} registada no SOMA.",
         )

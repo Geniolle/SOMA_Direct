@@ -130,9 +130,11 @@ def test_existing_exact_transfer_is_recovered_without_creation():
 
     outcome = orch._process_claimed_row(make_row(tipo=TipoMovimento.TRANSFERENCIA))
 
-    assert outcome.success and outcome.doc_id == "TRF_290734"
+    assert outcome.success and outcome.doc_id == "Transferido"
     api.criar_transferencia.assert_not_called()
-    assert orch.sheets.mark_row_completed.call_args.kwargs["doc_id"] == "TRF_290734"
+    kwargs = orch.sheets.mark_row_completed.call_args.kwargs
+    assert kwargs["doc_id"] == "Transferido"
+    assert "290734" in kwargs["dados_doc"]
 
 
 def test_same_date_amount_with_other_caixas_blocks_creation():
@@ -156,7 +158,8 @@ def test_created_transfer_is_identified_by_new_id():
     outcome = api.criar_transferencia(row)
 
     assert outcome.success
-    assert outcome.doc_id == "TRF_101"
+    assert outcome.doc_id == "Transferido"
+    assert "101" in outcome.dados_doc
 
 
 def test_created_transfer_not_found_is_failure():
@@ -218,3 +221,79 @@ def test_each_cycle_renews_soma_session():
 def test_accented_caixa_saida_header_is_read():
     row = ContaOrdemRow.from_dict(2, {"TIPO": "Transferência", "CAIXA SAÍDA": "Caixa Diário"})
     assert row.caixa_saida == "Caixa Diário"
+
+
+# --- Transferido em DOC. SOMA -------------------------------------------------
+
+def test_completed_transfer_writes_transferido_without_soma_link():
+    from tests.test_origin_doc_update import FakeWorksheet, make_service
+
+    origin = FakeWorksheet([["ID_INTERNO", "DOC. SOMA"], ["EXT001", ""]])
+    service = make_service(origin)
+
+    service.mark_row_completed(7, "Transferido", "Transferência 101", processo="T_EXTRATO", id_interno="EXT001")
+
+    assert origin.updates == [("B2", [["Transferido"]])]
+    written = {u["range"]: u["values"][0][0] for u in service._ws.updates[-1][1]}
+    assert "Transferido" in written.values()
+    assert not any("HYPERLINK" in str(v) for v in written.values())
+
+
+@pytest.mark.parametrize("doc_id", ["TRF_149817", "transferido"])
+def test_completed_row_rejects_old_trf_format(doc_id):
+    from tests.test_origin_doc_update import FakeWorksheet, make_service
+
+    service = make_service(FakeWorksheet([["ID_INTERNO", "DOC. SOMA"], ["EXT001", ""]]))
+    with pytest.raises(ValueError):
+        service.mark_row_completed(7, doc_id, processo="T_EXTRATO", id_interno="EXT001")
+
+
+# --- Um registo por ronda, com revalidação ------------------------------------
+
+def make_pending_orchestrator(rows, fresh=None, max_rows=1):
+    orch = DirectOrchestrator.__new__(DirectOrchestrator)
+    orch.settings = SimpleNamespace(claim_stale_seconds=900, max_rows_per_cycle=max_rows,
+                                    run_caixas_bancos=False, run_soma_sheet=False)
+    orch.auth = MagicMock()
+    orch.api = MagicMock()
+    orch.sheets = MagicMock()
+    orch.sheets.get_all_rows.return_value = rows
+    fresh = fresh or {r.row_number: r for r in rows}
+    orch.sheets.get_row.side_effect = lambda idx: fresh.get(idx)
+    processed = []
+    orch.process_row = lambda row, dry_run=False: processed.append(row.row_number) or OperationOutcome(
+        True, "x", row.tipo.value, row.row_number, 0)
+    return orch, processed
+
+
+def test_scheduler_processes_one_row_per_cycle():
+    rows = [make_row(row_number=n, id_interno=f"EXT{n}", tipo=TipoMovimento.TRANSFERENCIA) for n in (5, 6, 7)]
+    orch, processed = make_pending_orchestrator(rows)
+
+    orch.run_pending()
+
+    assert processed == [5]
+
+
+def test_row_filled_meanwhile_is_skipped_and_next_empty_doc_is_used():
+    rows = [make_row(row_number=n, id_interno=f"EXT{n}") for n in (5, 6)]
+    fresh = {5: make_row(row_number=5, id_interno="EXT5", doc_soma="Transferido"), 6: rows[1]}
+    orch, processed = make_pending_orchestrator(rows, fresh=fresh)
+
+    orch.run_pending()
+
+    assert processed == [6]
+
+
+def test_transferido_rows_are_not_pending():
+    row = make_row(tipo=TipoMovimento.TRANSFERENCIA, doc_soma="Transferido")
+    assert not DirectOrchestrator._is_pending(row, 900)
+
+
+def test_explicit_limit_zero_processes_all():
+    rows = [make_row(row_number=n, id_interno=f"EXT{n}") for n in (5, 6, 7)]
+    orch, processed = make_pending_orchestrator(rows)
+
+    orch.run_pending(limit=0)
+
+    assert processed == [5, 6, 7]

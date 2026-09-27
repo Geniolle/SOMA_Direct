@@ -15,6 +15,7 @@ from domain.models import (
     OperationOutcome,
     TipoMovimento,
     PROCESSABLE_TYPES,
+    TRANSFER_DOC_MARKER,
     clean_amount_for_comparison,
     format_amount_for_input,
     is_entrada_ou_saida,
@@ -160,19 +161,19 @@ class DirectOrchestrator:
         if row.tipo == TipoMovimento.TRANSFERENCIA:
             same_amount, exact = self.api.find_transfers(row)
             if len(exact) == 1 and len(same_amount) == 1:
-                doc_id = f"TRF_{exact[0].transfer_id}"
-                logger.info(f"-> Transferência já existe no SOMA (ID {doc_id}). Atualizando planilha...")
+                transfer_id = exact[0].transfer_id
+                logger.info(f"-> Transferência já existe no SOMA (ID {transfer_id}). Atualizando planilha...")
                 self.sheets.mark_row_completed(
                     row_idx=row.row_number,
-                    doc_id=doc_id,
-                    dados_doc=f"Transferência recuperada do SOMA ({doc_id})",
+                    doc_id=TRANSFER_DOC_MARKER,
+                    dados_doc=f"Transferência {transfer_id} recuperada do SOMA",
                     elapsed_ms=0,
                     processo=row.processo,
                     id_interno=row.id_interno,
                 )
                 return OperationOutcome(
                     success=True,
-                    doc_id=doc_id,
+                    doc_id=TRANSFER_DOC_MARKER,
                     tipo=row.tipo.value,
                     row_number=row.row_number,
                     elapsed_ms=0,
@@ -321,44 +322,59 @@ class DirectOrchestrator:
         logger.info(f"=== BATCH FINALIZADO: {len(outcomes)} linhas processadas em {total_ms/1000:.2f}s ({total_ms}ms) ===")
         return outcomes
 
+    @staticmethod
+    def _is_pending(row: ContaOrdemRow, claim_stale_seconds: int) -> bool:
+        """Pendente = tipo processável, DOC. SOMA vazio (ou EM ERRO) e sem reserva ativa."""
+        if not is_processable(row.tipo):
+            return False
+        doc = (row.doc_soma or "").strip().upper()
+        processing = row.status.upper().startswith("EM PROCESSAMENTO")
+        stale = False
+        if processing:
+            parts = row.status.split(":", 2)
+            try:
+                stale = len(parts) >= 2 and time.time() - int(parts[1]) > claim_stale_seconds
+            except ValueError:
+                stale = False
+        return (not doc or doc == "EM ERRO") and (not processing or stale)
+
     def run_pending(self, limit: Optional[int] = None, dry_run: bool = False) -> List[OperationOutcome]:
-        """Varre a planilha CONTAORDEM e processa todos os registros pendentes (Entrada, Saída, Transferência)."""
+        """Processa os registos pendentes da CONTAORDEM (Entrada, Saída, Transferência).
+
+        Um registo de cada vez: por omissão ``settings.max_rows_per_cycle`` (1) por
+        ronda, para não sobrecarregar o SOMA. Antes de cada lançamento a linha é
+        relida da sheet e só avança se o DOC. SOMA continuar vazio.
+        """
         self.initialize()
+        if limit is None:
+            limit = getattr(self.settings, "max_rows_per_cycle", 0)
         logger.info("Buscando registros pendentes na planilha...")
-        # Obter todos os registros (sem filtro de tipo) para avaliar tipos processáveis
         all_rows = self.sheets.get_all_rows(only_entrada_saida=False)
-
-        pending = []
-        for r in all_rows:
-            # Validar tipo: apenas processáveis (Entrada, Saída, Transferência)
-            if not is_processable(r.tipo):
-                continue
-            doc = (r.doc_soma or "").strip().upper()
-            processing = r.status.upper().startswith("EM PROCESSAMENTO")
-            stale = False
-            if processing:
-                parts = r.status.split(":", 2)
-                try:
-                    stale = len(parts) >= 2 and time.time() - int(parts[1]) > self.settings.claim_stale_seconds
-                except ValueError:
-                    stale = False
-            if (not doc or doc == "EM ERRO") and (not processing or stale):
-                pending.append(r)
-
-        if limit and limit > 0:
-            pending = pending[:limit]
-
+        stale_seconds = self.settings.claim_stale_seconds
+        pending = [r for r in all_rows if self._is_pending(r, stale_seconds)]
         logger.info(f"Total de registros pendentes identificados: {len(pending)}")
+
         outcomes = []
         overall_t0 = time.perf_counter()
 
         for r in pending:
-            outcomes.append(self.process_row(r, dry_run=dry_run))
+            if limit and limit > 0 and len(outcomes) >= limit:
+                break
+            # Revalidação imediata: outra ronda/processo pode ter preenchido a linha.
+            fresh = self.sheets.get_row(r.row_number)
+            if (
+                not fresh
+                or fresh.id_interno != r.id_interno
+                or not self._is_pending(fresh, stale_seconds)
+            ):
+                logger.info("Linha %s deixou de estar pendente; ignorada nesta ronda.", r.row_number)
+                continue
+            outcomes.append(self.process_row(fresh, dry_run=dry_run))
 
         total_ms = int((time.perf_counter() - overall_t0) * 1000)
         logger.info(f"=== BATCH PENDENTES FINALIZADO: {len(outcomes)} linhas em {total_ms/1000:.2f}s ===")
 
-        if pending and not dry_run:
+        if outcomes and not dry_run:
             self.run_post_processes()
 
         return outcomes
