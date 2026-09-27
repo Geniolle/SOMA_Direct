@@ -44,8 +44,9 @@ def test_origin_identification_is_required():
 
 
 def test_all_required_fields_are_reported_together():
+    # Teste com Entrada que tem múltiplos campos vazios
     row = valid_row(
-        tipo=TipoMovimento.OUTRO,
+        tipo=TipoMovimento.ENTRADA,
         plano_conta="",
         centro_custo="",
         descricao_soma="",
@@ -53,10 +54,11 @@ def test_all_required_fields_are_reported_together():
         caixa="",
     )
     error = DirectOrchestrator._validate_launch_row(row)
-    assert error == (
-        "Campos obrigatórios ausentes: TIPO, PLANO DE CONTA, CENTRO DE CUSTO, "
-        "DESCRIÇÃO SOMA, CAIXA, FORMA DE PAGAMENTO"
-    )
+    assert error is not None
+    assert "Campos obrigatórios ausentes:" in error
+    required_fields = ["PLANO DE CONTA", "CENTRO DE CUSTO", "DESCRIÇÃO SOMA", "CAIXA", "FORMA DE PAGAMENTO"]
+    for field in required_fields:
+        assert field in error
 
 
 class FakeSheets:
@@ -177,3 +179,12 @@ def test_single_open_result_is_paid_then_copied():
     assert outcome.doc_id == "10"
     assert orchestrator.audit_service.payment_calls == 1
     assert orchestrator.sheets.completed["doc_id"] == "10"
+
+
+def test_non_processable_type_is_rejected():
+    """Testa que tipos não-processáveis (Cartão, MVV, Outro) são rejeitados."""
+    for tipo in [TipoMovimento.CARTAO, TipoMovimento.MVV, TipoMovimento.OUTRO]:
+        error = DirectOrchestrator._validate_launch_row(valid_row(tipo=tipo))
+        assert error is not None
+        assert "não é processável" in error
+        assert tipo.value in error

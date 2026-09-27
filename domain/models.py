@@ -17,12 +17,27 @@ class TipoMovimento(str, Enum):
     OUTRO = "Outro"
 
 
+PROCESSABLE_TYPES = {
+    TipoMovimento.ENTRADA,
+    TipoMovimento.SAIDA,
+    TipoMovimento.TRANSFERENCIA,
+}
+
+
 def is_entrada_ou_saida(val: Any) -> bool:
     """Retorna True apenas se o tipo for estritamente Entrada ou Saída."""
     if isinstance(val, TipoMovimento):
         return val in (TipoMovimento.ENTRADA, TipoMovimento.SAIDA)
     norm = norm_basic(val)
     return norm in ("entrada", "ent", "in", "saida", "saída", "out")
+
+
+def is_processable(val: Any) -> bool:
+    """Retorna True se o tipo é processável no SOMA_Direct (Entrada, Saída ou Transferência)."""
+    if isinstance(val, TipoMovimento):
+        return val in PROCESSABLE_TYPES
+    norm = norm_basic(val)
+    return norm in ("entrada", "ent", "in", "saida", "saída", "out", "transferencia", "trf")
 
 
 def normalize_str(s: Any) -> str:

@@ -14,9 +14,11 @@ from domain.models import (
     ContaOrdemRow,
     OperationOutcome,
     TipoMovimento,
+    PROCESSABLE_TYPES,
     clean_amount_for_comparison,
     format_amount_for_input,
     is_entrada_ou_saida,
+    is_processable,
     norm_basic,
     normalize_date_str,
     normalize_document_value,
@@ -86,6 +88,10 @@ class DirectOrchestrator:
 
     @staticmethod
     def _validate_launch_row(row: ContaOrdemRow) -> Optional[str]:
+        # Validação 1: Tipo deve ser processável (Entrada, Saída ou Transferência)
+        if not is_processable(row.tipo):
+            return f"Tipo '{row.tipo.value}' não é processável no SOMA_Direct (apenas Entrada, Saída e Transferência são aceites)"
+
         required = {
             "DATA MOV.": row.data_mov,
             "TIPO": row.tipo.value if row.tipo else "",
@@ -236,12 +242,22 @@ class DirectOrchestrator:
             )
 
         # 2. Nenhum registro encontrado: criação autorizada.
+        if row.tipo not in PROCESSABLE_TYPES:
+            error_msg = f"Tipo '{row.tipo.value}' não é processável no SOMA_Direct (apenas Entrada, Saída e Transferência são aceites)"
+            logger.error(f"Linha {row.row_number}: {error_msg}")
+            self.sheets.mark_row_validation_error(row.row_number, error_msg)
+            return OperationOutcome(False, "", row.tipo.value, row.row_number, 0, error_message=error_msg)
+
         if row.tipo == TipoMovimento.SAIDA:
             outcome = self.api.criar_saida(row)
         elif row.tipo == TipoMovimento.ENTRADA:
             outcome = self.api.criar_entrada(row)
-        else:
+        elif row.tipo == TipoMovimento.TRANSFERENCIA:
             outcome = self.api.criar_transferencia(row)
+        else:
+            error_msg = f"Tipo não tratado: {row.tipo.value}"
+            logger.error(f"Linha {row.row_number}: {error_msg}")
+            return OperationOutcome(False, "", row.tipo.value, row.row_number, 0, error_message=error_msg)
 
         # 3. Atualização na planilha Google Sheets
         if outcome.success:
@@ -267,7 +283,7 @@ class DirectOrchestrator:
         return outcome
 
     def run_target_rows(self, row_indices: List[int], dry_run: bool = False) -> List[OperationOutcome]:
-        """Executa uma lista de linhas especificadas por índice (aceita qualquer tipo de registo)."""
+        """Executa uma lista de linhas especificadas por índice (apenas tipos processáveis: Entrada, Saída, Transferência)."""
         self.initialize()
 
         outcomes = []
@@ -278,6 +294,12 @@ class DirectOrchestrator:
             if not row:
                 logger.error(f"Linha {idx} não encontrada na planilha!")
                 continue
+            # Validar tipo: apenas processáveis (Entrada, Saída, Transferência)
+            if not is_processable(row.tipo):
+                error_msg = f"Tipo '{row.tipo.value}' não é processável no SOMA_Direct (apenas Entrada, Saída e Transferência são aceites)"
+                logger.error(f"Linha {idx}: {error_msg}")
+                outcomes.append(OperationOutcome(False, "", row.tipo.value, idx, 0, error_message=error_msg))
+                continue
             outcomes.append(self.process_row(row, dry_run=dry_run))
 
         total_ms = int((time.perf_counter() - overall_t0) * 1000)
@@ -285,13 +307,17 @@ class DirectOrchestrator:
         return outcomes
 
     def run_pending(self, limit: Optional[int] = None, dry_run: bool = False) -> List[OperationOutcome]:
-        """Varre a planilha CONTAORDEM e processa todos os registros pendentes."""
+        """Varre a planilha CONTAORDEM e processa todos os registros pendentes (Entrada, Saída, Transferência)."""
         self.initialize()
         logger.info("Buscando registros pendentes na planilha...")
-        all_rows = self.sheets.get_all_rows(only_entrada_saida=True)
+        # Obter todos os registros (sem filtro de tipo) para avaliar tipos processáveis
+        all_rows = self.sheets.get_all_rows(only_entrada_saida=False)
 
         pending = []
         for r in all_rows:
+            # Validar tipo: apenas processáveis (Entrada, Saída, Transferência)
+            if not is_processable(r.tipo):
+                continue
             doc = (r.doc_soma or "").strip().upper()
             processing = r.status.upper().startswith("EM PROCESSAMENTO")
             stale = False
