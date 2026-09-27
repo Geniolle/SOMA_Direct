@@ -9,6 +9,7 @@ from typing import List, Optional
 from config.settings import Settings
 from core.auth import SomaAuthenticator
 from core.http_session import ResilientSession
+from core.run_lock import orchestrator_session
 from domain.models import (
     AuditOutcome,
     ContaOrdemRow,
@@ -300,6 +301,12 @@ class DirectOrchestrator:
 
     def run_target_rows(self, row_indices: List[int], dry_run: bool = False) -> List[OperationOutcome]:
         """Executa uma lista de linhas especificadas por índice (apenas tipos processáveis: Entrada, Saída, Transferência)."""
+        with orchestrator_session() as acquired:
+            if not acquired:
+                return []
+            return self._run_target_rows(row_indices, dry_run=dry_run)
+
+    def _run_target_rows(self, row_indices: List[int], dry_run: bool = False) -> List[OperationOutcome]:
         self.initialize()
 
         outcomes = []
@@ -339,35 +346,49 @@ class DirectOrchestrator:
         return (not doc or doc == "EM ERRO") and (not processing or stale)
 
     def run_pending(self, limit: Optional[int] = None, dry_run: bool = False) -> List[OperationOutcome]:
-        """Processa os registos pendentes da CONTAORDEM (Entrada, Saída, Transferência).
+        """Processa os pendentes da CONTAORDEM (Entrada, Saída, Transferência) em ciclo.
 
-        Um registo de cada vez: por omissão ``settings.max_rows_per_cycle`` (1) por
-        ronda, para não sobrecarregar o SOMA. Antes de cada lançamento a linha é
-        relida da sheet e só avança se o DOC. SOMA continuar vazio.
+        Um registo de cada vez: procura candidatos, executa o primeiro e volta a
+        procurar; termina quando não há mais candidatos. Só pode existir uma
+        sessão ativa do orquestrador — se outra estiver a correr, aborta.
         """
-        self.initialize()
-        if limit is None:
-            limit = getattr(self.settings, "max_rows_per_cycle", 0)
-        logger.info("Buscando registros pendentes na planilha...")
-        all_rows = self.sheets.get_all_rows(only_entrada_saida=False)
-        stale_seconds = self.settings.claim_stale_seconds
-        pending = [r for r in all_rows if self._is_pending(r, stale_seconds)]
-        logger.info(f"Total de registros pendentes identificados: {len(pending)}")
+        with orchestrator_session() as acquired:
+            if not acquired:
+                return []
+            return self._run_pending_loop(limit=limit, dry_run=dry_run)
 
-        outcomes = []
+    def _run_pending_loop(self, limit: Optional[int] = None, dry_run: bool = False) -> List[OperationOutcome]:
+        self.initialize()
+        stale_seconds = self.settings.claim_stale_seconds
+        attempted = set()
+        outcomes: List[OperationOutcome] = []
         overall_t0 = time.perf_counter()
 
-        for r in pending:
-            if limit and limit > 0 and len(outcomes) >= limit:
+        while not (limit and limit > 0 and len(outcomes) >= limit):
+            # Nova procura de candidatos a cada registo (a sheet muda entre execuções).
+            rows = self.sheets.get_all_rows(only_entrada_saida=False)
+            candidate = next(
+                (
+                    r for r in rows
+                    if (r.row_number, r.id_interno) not in attempted
+                    and self._is_pending(r, stale_seconds)
+                ),
+                None,
+            )
+            if candidate is None:
+                logger.info("Sem candidatos pendentes. Ronda terminada.")
                 break
-            # Revalidação imediata: outra ronda/processo pode ter preenchido a linha.
-            fresh = self.sheets.get_row(r.row_number)
+            # Cada linha é tentada no máximo uma vez por sessão (evita ciclo em erro).
+            attempted.add((candidate.row_number, candidate.id_interno))
+
+            # Revalidação imediata antes de lançar.
+            fresh = self.sheets.get_row(candidate.row_number)
             if (
                 not fresh
-                or fresh.id_interno != r.id_interno
+                or fresh.id_interno != candidate.id_interno
                 or not self._is_pending(fresh, stale_seconds)
             ):
-                logger.info("Linha %s deixou de estar pendente; ignorada nesta ronda.", r.row_number)
+                logger.info("Linha %s deixou de estar pendente; ignorada.", candidate.row_number)
                 continue
             outcomes.append(self.process_row(fresh, dry_run=dry_run))
 

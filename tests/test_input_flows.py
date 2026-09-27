@@ -248,36 +248,58 @@ def test_completed_row_rejects_old_trf_format(doc_id):
         service.mark_row_completed(7, doc_id, processo="T_EXTRATO", id_interno="EXT001")
 
 
-# --- Um registo por ronda, com revalidação ------------------------------------
+# --- Ciclo contínuo: um registo de cada vez até não haver candidatos ---------
 
-def make_pending_orchestrator(rows, fresh=None, max_rows=1):
+def make_pending_orchestrator(rows, fresh=None, fail_rows=()):
     orch = DirectOrchestrator.__new__(DirectOrchestrator)
-    orch.settings = SimpleNamespace(claim_stale_seconds=900, max_rows_per_cycle=max_rows,
-                                    run_caixas_bancos=False, run_soma_sheet=False)
+    orch.settings = SimpleNamespace(claim_stale_seconds=900, run_caixas_bancos=False, run_soma_sheet=False)
     orch.auth = MagicMock()
     orch.api = MagicMock()
     orch.sheets = MagicMock()
-    orch.sheets.get_all_rows.return_value = rows
-    fresh = fresh or {r.row_number: r for r in rows}
-    orch.sheets.get_row.side_effect = lambda idx: fresh.get(idx)
+    sheet = {r.row_number: r for r in rows}
+    orch.sheets.get_all_rows.side_effect = lambda **kw: list(sheet.values())
+    fresh_rows = fresh or {}
+    orch.sheets.get_row.side_effect = lambda idx: fresh_rows.get(idx, sheet.get(idx))
     processed = []
-    orch.process_row = lambda row, dry_run=False: processed.append(row.row_number) or OperationOutcome(
-        True, "x", row.tipo.value, row.row_number, 0)
+
+    def fake_process(row, dry_run=False):
+        processed.append(row.row_number)
+        ok = row.row_number not in fail_rows
+        # Sucesso preenche o DOC. SOMA; falha deixa a linha EM ERRO (continua pendente).
+        sheet[row.row_number] = make_row(
+            row_number=row.row_number, id_interno=row.id_interno, tipo=row.tipo,
+            doc_soma="Transferido" if ok else "", status="VALIDADO" if ok else "EM ERRO",
+        )
+        return OperationOutcome(ok, "x", row.tipo.value, row.row_number, 0)
+
+    orch.process_row = fake_process
     return orch, processed
 
 
-def test_scheduler_processes_one_row_per_cycle():
+def test_loop_processes_one_row_at_a_time_until_no_candidates():
     rows = [make_row(row_number=n, id_interno=f"EXT{n}", tipo=TipoMovimento.TRANSFERENCIA) for n in (5, 6, 7)]
     orch, processed = make_pending_orchestrator(rows)
 
     orch.run_pending()
 
-    assert processed == [5]
+    assert processed == [5, 6, 7]
+    # Uma procura de candidatos antes de cada registo + a procura final vazia.
+    assert orch.sheets.get_all_rows.call_count == 4
+
+
+def test_failed_row_is_not_retried_in_the_same_session():
+    rows = [make_row(row_number=n, id_interno=f"EXT{n}") for n in (5, 6)]
+    orch, processed = make_pending_orchestrator(rows, fail_rows={5})
+
+    outcomes = orch.run_pending()
+
+    assert processed == [5, 6]
+    assert [o.success for o in outcomes] == [False, True]
 
 
 def test_row_filled_meanwhile_is_skipped_and_next_empty_doc_is_used():
     rows = [make_row(row_number=n, id_interno=f"EXT{n}") for n in (5, 6)]
-    fresh = {5: make_row(row_number=5, id_interno="EXT5", doc_soma="Transferido"), 6: rows[1]}
+    fresh = {5: make_row(row_number=5, id_interno="EXT5", doc_soma="Transferido")}
     orch, processed = make_pending_orchestrator(rows, fresh=fresh)
 
     orch.run_pending()
@@ -285,15 +307,43 @@ def test_row_filled_meanwhile_is_skipped_and_next_empty_doc_is_used():
     assert processed == [6]
 
 
+def test_no_candidates_ends_session_without_processing():
+    orch, processed = make_pending_orchestrator([make_row(doc_soma="5500123")])
+
+    assert orch.run_pending() == []
+    assert processed == []
+
+
 def test_transferido_rows_are_not_pending():
     row = make_row(tipo=TipoMovimento.TRANSFERENCIA, doc_soma="Transferido")
     assert not DirectOrchestrator._is_pending(row, 900)
 
 
-def test_explicit_limit_zero_processes_all():
-    rows = [make_row(row_number=n, id_interno=f"EXT{n}") for n in (5, 6, 7)]
-    orch, processed = make_pending_orchestrator(rows)
+# --- Sessão única do orquestrador ----------------------------------------------
 
-    orch.run_pending(limit=0)
+def test_second_session_is_refused_while_first_is_active(tmp_path):
+    from core.run_lock import orchestrator_session
 
-    assert processed == [5, 6, 7]
+    lock = tmp_path / "orch.lock"
+    with orchestrator_session(lock) as first:
+        assert first is True
+        with orchestrator_session(lock) as second:
+            assert second is False
+    with orchestrator_session(lock) as again:
+        assert again is True
+
+
+@pytest.mark.parametrize("method, args", [("run_pending", ()), ("run_target_rows", ([5],))])
+def test_orchestrator_aborts_when_session_already_active(monkeypatch, method, args):
+    from contextlib import contextmanager
+
+    @contextmanager
+    def busy():
+        yield False
+
+    monkeypatch.setattr("workflows.orchestrator.orchestrator_session", busy)
+    orch, processed = make_pending_orchestrator([make_row(row_number=5, id_interno="EXT5")])
+
+    assert getattr(orch, method)(*args) == []
+    orch.auth.login.assert_not_called()
+    assert processed == []

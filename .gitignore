@@ -36,3 +36,6 @@ credentials/*.json
 logs/
 *.log
 artifacts/
+
+# Lock de sessão única do orquestrador
+.orchestrator.lock
