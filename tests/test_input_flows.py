@@ -20,7 +20,7 @@ def make_row(**overrides):
         "doc_soma": "",
         "tipo": TipoMovimento.ENTRADA,
         "plano_conta": "PLANO",
-        "centro_custo": "CENTRO",
+        "centro_custo": "PADRÃO",
         "forma_pagamento": "DINHEIRO",
         "caixa": "Caixa Económica Montepio Geral - CC",
         "caixa_saida": "Caixa Diário",
@@ -90,16 +90,26 @@ def test_non_processable_types_never_reach_creation(tipo):
 
 # --- Transferências: guarda anti-duplicado -----------------------------------
 
-def make_soma_api(pages):
-    """SomaApiService com HTTP falso: ``pages`` é uma lista de respostas da pesquisa."""
+def make_soma_api(pages, save_text='{"status": 1}'):
+    """SomaApiService com HTTP falso: ``pages`` são as respostas da pesquisa de transferências."""
     http = MagicMock()
     responses = iter(pages)
-    http.post_ajax.side_effect = lambda *a, **k: SimpleNamespace(status_code=200, text=next(responses))
-    http.post.return_value = SimpleNamespace(status_code=200, text="<html><script>x.onerror=1</script>ok</html>", url="u")
+    saves = []
+
+    def post_ajax(url, data=None, **kw):
+        if "sys/app/" in url:
+            saves.append((url, data))
+            return SimpleNamespace(status_code=200, text=save_text, url=url)
+        return SimpleNamespace(status_code=200, text=next(responses))
+
+    http.post_ajax.side_effect = post_ajax
     settings = SimpleNamespace(site_base_url="https://example.test/IVV", institution_id="1", user_job_id="J")
     api = SomaApiService(settings, http)
     api._confirmation_attempts = 2
-    api.resolve_caixa_id = lambda name: "1"
+    api._loaded_catalogs = True
+    api._caixas_map = {"caixa diario": "1230", "caixa economica montepio geral": "1226"}
+    api._centro_custo_map = {"padrao": "0"}
+    api.saves = saves
     return api
 
 
@@ -160,16 +170,47 @@ def test_created_transfer_is_identified_by_new_id():
     assert outcome.success
     assert outcome.doc_id == "Transferido"
     assert "101" in outcome.dados_doc
+    url, payload = api.saves[-1]
+    assert url.endswith("sys/app/transferencias_caixas.php")
+    assert payload["id_caixa_origem"] == "1230" and payload["id_caixa_destino"] == "1226"
+    assert payload["id_cc_saida"] == "0" and payload["id_cc_entrada"] == "0"  # PADRÃO
+    assert payload["valor_transferencia"] == payload["valor_transferencia_entrada"] == "115,00"
+    assert payload["data_transferencia"] == "03/09/2026"
 
 
-def test_created_transfer_not_found_is_failure():
+@pytest.mark.parametrize("status, message", [(6, "mês fechado"), (5, "não possui o valor"), (2, "nenhuma operação")])
+def test_transfer_rejected_by_soma_is_failure(status, message):
+    row = make_row(tipo=TipoMovimento.TRANSFERENCIA)
+    api = make_soma_api(["<table></table>"], save_text=f'{{"status": {status}}}')
+
+    outcome = api.criar_transferencia(row)
+
+    assert not outcome.success
+    assert message in outcome.error_message
+
+
+def test_transfer_confirmed_by_soma_without_id_is_still_saved():
+    # status 1 = "A transferência foi salva": não pode ficar EM ERRO (repetir criaria duplicado).
     row = make_row(tipo=TipoMovimento.TRANSFERENCIA)
     api = make_soma_api(["<table></table>"] * 3)
 
     outcome = api.criar_transferencia(row)
 
+    assert outcome.success and outcome.doc_id == "Transferido"
+
+
+def test_page_response_without_json_is_failure():
+    row = make_row(tipo=TipoMovimento.TRANSFERENCIA)
+    api = make_soma_api(["<table></table>"], save_text="<html>SOMA página inicial</html>")
+
+    outcome = api.criar_transferencia(row)
+
     assert not outcome.success
-    assert "não foi localizada" in outcome.error_message
+
+
+def test_legacy_trf_marker_is_pending_again():
+    row = make_row(tipo=TipoMovimento.TRANSFERENCIA, doc_soma="TRF_149817", status="VALIDADO")
+    assert DirectOrchestrator._is_pending(row, 900)
 
 
 # --- Deteção de erro na resposta do SOMA -------------------------------------

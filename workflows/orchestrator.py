@@ -335,6 +335,9 @@ class DirectOrchestrator:
         if not is_processable(row.tipo):
             return False
         doc = (row.doc_soma or "").strip().upper()
+        # "TRF_#####" foi gravado por uma versão com defeito e não corresponde a
+        # nenhuma transferência real no SOMA: a linha volta a ser candidata.
+        legacy_trf = row.tipo == TipoMovimento.TRANSFERENCIA and doc.startswith("TRF_")
         processing = row.status.upper().startswith("EM PROCESSAMENTO")
         stale = False
         if processing:
@@ -343,7 +346,7 @@ class DirectOrchestrator:
                 stale = len(parts) >= 2 and time.time() - int(parts[1]) > claim_stale_seconds
             except ValueError:
                 stale = False
-        return (not doc or doc == "EM ERRO") and (not processing or stale)
+        return (not doc or doc == "EM ERRO" or legacy_trf) and (not processing or stale)
 
     def run_pending(self, limit: Optional[int] = None, dry_run: bool = False) -> List[OperationOutcome]:
         """Processa os pendentes da CONTAORDEM (Entrada, Saída, Transferência) em ciclo.
