@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from typing import Optional
-from domain.models import ContaOrdemRow, TipoMovimento
+from domain.models import TRANSFER_DOC_MARKER, ContaOrdemRow, TipoMovimento
 from services.soma_api_service import SomaApiService
 
 logger = logging.getLogger("soma_direct.duplicate_checker")
@@ -21,10 +21,11 @@ class DuplicateChecker:
         data_mov = row.data_mov
 
         if row.tipo == TipoMovimento.TRANSFERENCIA:
-            existing_id = self.api._find_transfer_id(valor=valor, data_mov=data_mov)
-            if existing_id:
+            _, exact = self.api.find_transfers(row)
+            if len(exact) == 1:
+                existing_id = exact[0].transfer_id
                 logger.info(f"Linha {row.row_number}: Transferencia ja existente no SOMA (ID {existing_id}).")
-                return f"TRF_{existing_id}"
+                return TRANSFER_DOC_MARKER
         else:
             tipo_code = "0" if row.tipo == TipoMovimento.SAIDA else "1"
             existing_id = self.api._find_doc_id(tipo=tipo_code, descricao=desc, valor=valor, data_mov=data_mov)

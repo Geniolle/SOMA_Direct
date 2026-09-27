@@ -20,6 +20,10 @@ class SomaAuthenticator:
     def login(self, force: bool = False) -> bool:
         if self.is_authenticated and not force:
             return True
+        # Nova autenticação parte sempre de uma sessão limpa (cookie expirado
+        # não pode ser reaproveitado).
+        self.is_authenticated = False
+        self.http.session.cookies.clear()
         if not self.settings.site_user or not self.settings.site_password:
             logger.error("SITE_USER e SITE_PASSWORD devem ser definidos no ambiente.")
             return False

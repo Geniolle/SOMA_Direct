@@ -9,12 +9,14 @@ from typing import List, Optional
 from config.settings import Settings
 from core.auth import SomaAuthenticator
 from core.http_session import ResilientSession
+from core.run_lock import orchestrator_session
 from domain.models import (
     AuditOutcome,
     ContaOrdemRow,
     OperationOutcome,
     TipoMovimento,
     PROCESSABLE_TYPES,
+    TRANSFER_DOC_MARKER,
     clean_amount_for_comparison,
     format_amount_for_input,
     is_entrada_ou_saida,
@@ -48,8 +50,12 @@ class DirectOrchestrator:
         self.audit_service = AuditService(self.settings, self.http, self.sheets)
 
     def initialize(self) -> bool:
-        """Autentica na sessão HTTP e carrega catálogos de apoio."""
-        if not self.auth.login():
+        """Autentica na sessão HTTP e carrega catálogos de apoio.
+
+        O agendador reutiliza o mesmo orquestrador indefinidamente; a sessão PHP
+        do SOMA expira, pelo que cada ronda renova o login explicitamente.
+        """
+        if not self.auth.login(force=True):
             raise RuntimeError("Não foi possível autenticar no SOMA.")
         self.api.load_catalogs()
         return True
@@ -154,26 +160,37 @@ class DirectOrchestrator:
         # 1. Pesquisa preventiva: diferentes estratégias por tipo
         # Transferências são identificadas por valor+data, não por descrição
         if row.tipo == TipoMovimento.TRANSFERENCIA:
-            existing_id = self.api._find_transfer_id(valor=row.importancia, data_mov=row.data_mov)
-            if existing_id:
-                doc_id = f"TRF_{existing_id}"
-                logger.info(f"-> Transferência já existe no SOMA (ID {doc_id}). Atualizando planilha...")
+            same_amount, exact = self.api.find_transfers(row)
+            if len(exact) == 1 and len(same_amount) == 1:
+                transfer_id = exact[0].transfer_id
+                logger.info(f"-> Transferência já existe no SOMA (ID {transfer_id}). Atualizando planilha...")
                 self.sheets.mark_row_completed(
                     row_idx=row.row_number,
-                    doc_id=doc_id,
-                    dados_doc=f"Transferência recuperada do SOMA ({doc_id})",
+                    doc_id=TRANSFER_DOC_MARKER,
+                    dados_doc=f"Transferência {transfer_id} recuperada do SOMA",
                     elapsed_ms=0,
                     processo=row.processo,
                     id_interno=row.id_interno,
                 )
                 return OperationOutcome(
                     success=True,
-                    doc_id=doc_id,
+                    doc_id=TRANSFER_DOC_MARKER,
                     tipo=row.tipo.value,
                     row_number=row.row_number,
                     elapsed_ms=0,
                     dados_doc="Transferência já existe"
                 )
+            if same_amount:
+                # Existe(m) transferência(s) com a mesma data e valor que não
+                # correspondem de forma inequívoca: nunca criar outra às cegas.
+                ids = ", ".join(t.transfer_id for t in same_amount)
+                message = (
+                    f"Transferência(s) no SOMA com a mesma data e valor sem correspondência "
+                    f"inequívoca de caixas (IDs: {ids})"
+                )
+                logger.error("Linha %s: %s", row.row_number, message)
+                self.sheets.mark_row_validation_error(row.row_number, message)
+                return OperationOutcome(False, "Analisar", row.tipo.value, row.row_number, 0, error_message=message)
             # Transferência nova: prosseguir para criação
             candidates = []
         else:
@@ -284,6 +301,12 @@ class DirectOrchestrator:
 
     def run_target_rows(self, row_indices: List[int], dry_run: bool = False) -> List[OperationOutcome]:
         """Executa uma lista de linhas especificadas por índice (apenas tipos processáveis: Entrada, Saída, Transferência)."""
+        with orchestrator_session() as acquired:
+            if not acquired:
+                return []
+            return self._run_target_rows(row_indices, dry_run=dry_run)
+
+    def _run_target_rows(self, row_indices: List[int], dry_run: bool = False) -> List[OperationOutcome]:
         self.initialize()
 
         outcomes = []
@@ -306,44 +329,73 @@ class DirectOrchestrator:
         logger.info(f"=== BATCH FINALIZADO: {len(outcomes)} linhas processadas em {total_ms/1000:.2f}s ({total_ms}ms) ===")
         return outcomes
 
+    @staticmethod
+    def _is_pending(row: ContaOrdemRow, claim_stale_seconds: int) -> bool:
+        """Pendente = tipo processável, DOC. SOMA vazio (ou EM ERRO) e sem reserva ativa."""
+        if not is_processable(row.tipo):
+            return False
+        doc = (row.doc_soma or "").strip().upper()
+        processing = row.status.upper().startswith("EM PROCESSAMENTO")
+        stale = False
+        if processing:
+            parts = row.status.split(":", 2)
+            try:
+                stale = len(parts) >= 2 and time.time() - int(parts[1]) > claim_stale_seconds
+            except ValueError:
+                stale = False
+        return (not doc or doc == "EM ERRO") and (not processing or stale)
+
     def run_pending(self, limit: Optional[int] = None, dry_run: bool = False) -> List[OperationOutcome]:
-        """Varre a planilha CONTAORDEM e processa todos os registros pendentes (Entrada, Saída, Transferência)."""
+        """Processa os pendentes da CONTAORDEM (Entrada, Saída, Transferência) em ciclo.
+
+        Um registo de cada vez: procura candidatos, executa o primeiro e volta a
+        procurar; termina quando não há mais candidatos. Só pode existir uma
+        sessão ativa do orquestrador — se outra estiver a correr, aborta.
+        """
+        with orchestrator_session() as acquired:
+            if not acquired:
+                return []
+            return self._run_pending_loop(limit=limit, dry_run=dry_run)
+
+    def _run_pending_loop(self, limit: Optional[int] = None, dry_run: bool = False) -> List[OperationOutcome]:
         self.initialize()
-        logger.info("Buscando registros pendentes na planilha...")
-        # Obter todos os registros (sem filtro de tipo) para avaliar tipos processáveis
-        all_rows = self.sheets.get_all_rows(only_entrada_saida=False)
-
-        pending = []
-        for r in all_rows:
-            # Validar tipo: apenas processáveis (Entrada, Saída, Transferência)
-            if not is_processable(r.tipo):
-                continue
-            doc = (r.doc_soma or "").strip().upper()
-            processing = r.status.upper().startswith("EM PROCESSAMENTO")
-            stale = False
-            if processing:
-                parts = r.status.split(":", 2)
-                try:
-                    stale = len(parts) >= 2 and time.time() - int(parts[1]) > self.settings.claim_stale_seconds
-                except ValueError:
-                    stale = False
-            if (not doc or doc == "EM ERRO") and (not processing or stale):
-                pending.append(r)
-
-        if limit and limit > 0:
-            pending = pending[:limit]
-
-        logger.info(f"Total de registros pendentes identificados: {len(pending)}")
-        outcomes = []
+        stale_seconds = self.settings.claim_stale_seconds
+        attempted = set()
+        outcomes: List[OperationOutcome] = []
         overall_t0 = time.perf_counter()
 
-        for r in pending:
-            outcomes.append(self.process_row(r, dry_run=dry_run))
+        while not (limit and limit > 0 and len(outcomes) >= limit):
+            # Nova procura de candidatos a cada registo (a sheet muda entre execuções).
+            rows = self.sheets.get_all_rows(only_entrada_saida=False)
+            candidate = next(
+                (
+                    r for r in rows
+                    if (r.row_number, r.id_interno) not in attempted
+                    and self._is_pending(r, stale_seconds)
+                ),
+                None,
+            )
+            if candidate is None:
+                logger.info("Sem candidatos pendentes. Ronda terminada.")
+                break
+            # Cada linha é tentada no máximo uma vez por sessão (evita ciclo em erro).
+            attempted.add((candidate.row_number, candidate.id_interno))
+
+            # Revalidação imediata antes de lançar.
+            fresh = self.sheets.get_row(candidate.row_number)
+            if (
+                not fresh
+                or fresh.id_interno != candidate.id_interno
+                or not self._is_pending(fresh, stale_seconds)
+            ):
+                logger.info("Linha %s deixou de estar pendente; ignorada.", candidate.row_number)
+                continue
+            outcomes.append(self.process_row(fresh, dry_run=dry_run))
 
         total_ms = int((time.perf_counter() - overall_t0) * 1000)
         logger.info(f"=== BATCH PENDENTES FINALIZADO: {len(outcomes)} linhas em {total_ms/1000:.2f}s ===")
 
-        if pending and not dry_run:
+        if outcomes and not dry_run:
             self.run_post_processes()
 
         return outcomes
