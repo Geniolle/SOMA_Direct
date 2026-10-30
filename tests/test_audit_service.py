@@ -1,4 +1,5 @@
 import pytest
+from types import SimpleNamespace
 from domain.models import (
     ContaOrdemRow,
     SomaSearchResult,
@@ -84,6 +85,85 @@ def test_validate_soma_record():
     status, inconsistencias = service.validate_soma_record(row, res)
     assert status == "Confirmado"
     assert not inconsistencias
+
+
+def test_validate_soma_financial_fields_uses_descricao_soma_only():
+    service = AuditService(settings=None, http=None, sheets=None)
+    row = ContaOrdemRow(
+        row_number=10,
+        data_mov="26/10/2026",
+        descricao="DESCRIÇÃO ERRADA",
+        descricao_soma="ENERGIA ELÉTRICA N001",
+        importancia="244,42",
+        doc_soma="5629124",
+        tipo=TipoMovimento.SAIDA,
+    )
+    result = SomaSearchResult(
+        "5629124", "SAÍDA", "ENERGIA ELÉTRICA N001", "244,42", "26/10/2026"
+    )
+
+    assert service.validate_soma_financial_fields(row, result) == []
+
+
+def test_validate_soma_financial_fields_rejects_empty_descricao_soma():
+    service = AuditService(settings=None, http=None, sheets=None)
+    row = ContaOrdemRow(
+        row_number=10,
+        data_mov="26/10/2026",
+        descricao="ENERGIA ELÉTRICA N001",
+        descricao_soma="",
+        importancia="244,42",
+        doc_soma="5629124",
+        tipo=TipoMovimento.SAIDA,
+    )
+    result = SomaSearchResult(
+        "5629124", "SAÍDA", "ENERGIA ELÉTRICA N001", "244,42", "26/10/2026"
+    )
+
+    assert service.validate_soma_financial_fields(row, result) == [
+        "DESCRIÇÃO SOMA vazia na CONTAORDEM"
+    ]
+
+
+def test_update_soma_date_preserves_form_and_verifies_new_date(monkeypatch):
+    class Http:
+        def __init__(self):
+            self.posts = []
+
+        def get(self, url):
+            return SimpleNamespace(
+                status_code=200,
+                text="""
+                    <form name="frmDados">
+                      <input name="id_fluxo" value="0005629124">
+                      <input name="descricao" value="ENERGIA ELÉTRICA N001">
+                      <input name="data_vencimento" value="25/10/2026">
+                      <input name="data_entrada" value="25/10/2026">
+                      <input name="valor" value="244,42">
+                      <select name="tipo"><option value="0" selected>Saída</option></select>
+                    </form>
+                """,
+            )
+
+        def post(self, url, data):
+            self.posts.append((url, data))
+            return SimpleNamespace(status_code=200, text='{"status":1}')
+
+    http = Http()
+    settings = SimpleNamespace(site_base_url="https://soma.example/")
+    service = AuditService(settings=settings, http=http, sheets=None)
+    monkeypatch.setattr(
+        service,
+        "search_by_codigo",
+        lambda doc: SomaSearchResult(doc, "SAÍDA", "ENERGIA ELÉTRICA N001", "244,42", "26/10/2026"),
+    )
+
+    assert service.update_soma_date("5629124", "26/10/2026") is True
+    _, payload = http.posts[0]
+    assert payload["descricao"] == "ENERGIA ELÉTRICA N001"
+    assert payload["valor"] == "244,42"
+    assert payload["data_vencimento"] == "26/10/2026"
+    assert payload["data_entrada"] == "26/10/2026"
 
 
 def test_matches_ignoring_code_and_suffix():

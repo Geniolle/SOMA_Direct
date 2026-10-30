@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import re
 import time
-from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from config.settings import Settings
@@ -13,14 +12,13 @@ from domain.models import (
     CascadeAuditOutcome,
     ContaOrdemRow,
     SomaSearchResult,
-    TipoMovimento,
     clean_amount_for_comparison,
+    extract_suffix_n,
     is_entrada_ou_saida,
     norm_basic,
     normalize_date_str,
     normalize_document_value,
     strip_suffix_n,
-    extract_suffix_n,
     validate_dados_doc,
 )
 from services.sheets_service import GoogleSheetsService
@@ -168,7 +166,112 @@ class AuditService:
             logger.warning(f"Falha ao buscar DADOS DOC para {doc_clean}: {e}")
             return ""
 
-    def insert_soma_payment(
+    @staticmethod
+    def _payment_ids(html: str) -> List[str]:
+        ids = re.findall(r'<input\s+id="(\d+)"[^>]*class="[^"]*pagamentos_check', html, re.IGNORECASE)
+        if not ids:
+            ids = re.findall(r'<button\s+id="(\d+)"[^>]*class="[^"]*exc_baixa', html, re.IGNORECASE)
+        return list(dict.fromkeys(ids))
+
+    @staticmethod
+    def _pending_baixa_ids(html: str) -> List[str]:
+        ids = re.findall(r'class="[^"]*inst_baixa[^"]*"[^>]*id="(\d+)"', html, re.IGNORECASE)
+        if not ids:
+            ids = re.findall(r'id="(\d+)"[^>]*class="[^"]*inst_baixa', html, re.IGNORECASE)
+        return list(dict.fromkeys(ids))
+
+    def inspect_payment_controls(self, doc_id: str) -> Tuple[List[str], List[str]]:
+        """Consulta pagamentos e baixas pendentes sem executar mutações."""
+        doc_clean = normalize_document_value(doc_id)
+        if not doc_clean:
+            return [], []
+        url = f"{self.base_url}?mod=ivv&exec=entradas_saidas_dados&ID={doc_clean}"
+        response = self.http.get(url)
+        response.raise_for_status()
+        return self._payment_ids(response.text), self._pending_baixa_ids(response.text)
+
+    def update_soma_date(self, doc_id: str, data_mov: str) -> bool:
+        """Atualiza somente as datas do documento e confirma o resultado por nova consulta."""
+        doc_clean = normalize_document_value(doc_id)
+        target_date = normalize_date_str(data_mov)
+        if len(doc_clean) != 7 or not doc_clean.isdigit() or not target_date:
+            return False
+
+        try:
+            url_get = f"{self.base_url}?mod=ivv&exec=entradas_saidas_dados&ID={doc_clean}"
+            response = self.http.get(url_get)
+            if response.status_code != 200:
+                return False
+            forms = re.findall(
+                r'<form\b[^>]*name=["\']frmDados["\'][^>]*>(.*?)</form>',
+                response.text,
+                re.DOTALL | re.IGNORECASE,
+            )
+            if not forms:
+                forms = re.findall(
+                    r'<form\b[^>]*id=["\']exampleStandardForm["\'][^>]*>(.*?)</form>',
+                    response.text,
+                    re.DOTALL | re.IGNORECASE,
+                )
+            if not forms:
+                logger.error("Formulário não encontrado para atualizar a data do DOC %s.", doc_clean)
+                return False
+
+            form = forms[0]
+            payload: Dict[str, str] = {}
+            for input_tag in re.findall(r'<input\b[^>]*>', form, re.IGNORECASE):
+                name_match = re.search(r'name=["\'](.*?)["\']', input_tag, re.IGNORECASE)
+                if not name_match:
+                    continue
+                type_match = re.search(r'type=["\'](.*?)["\']', input_tag, re.IGNORECASE)
+                input_type = type_match.group(1).lower() if type_match else "text"
+                if input_type in ("radio", "checkbox") and "checked" not in input_tag.lower():
+                    continue
+                value_match = re.search(r'value=["\'](.*?)["\']', input_tag, re.IGNORECASE)
+                payload[name_match.group(1)] = value_match.group(1) if value_match else ""
+
+            for select_name, select_body in re.findall(
+                r'<select\b[^>]*name=["\'](.*?)["\'][^>]*>(.*?)</select>',
+                form,
+                re.DOTALL | re.IGNORECASE,
+            ):
+                selected = re.search(
+                    r'<option\b([^>]*selected[^>]*)>',
+                    select_body,
+                    re.DOTALL | re.IGNORECASE,
+                )
+                value_match = re.search(r'value=["\'](.*?)["\']', selected.group(1), re.IGNORECASE) if selected else None
+                payload[select_name] = value_match.group(1) if value_match else ""
+
+            payload["data_vencimento"] = target_date
+            payload["data_entrada"] = target_date
+            url_post = f"{self.base_url}?mod=app&exec=entradas_saidas&faz=dados"
+            posted = self.http.post(url_post, data=payload)
+            if posted.status_code != 200 or self._response_status(posted) == 5:
+                return False
+            time.sleep(0.4)
+            verified = self.search_by_codigo(doc_clean)
+            return bool(
+                verified
+                and normalize_document_value(verified.codigo) == doc_clean
+                and normalize_date_str(verified.data) == target_date
+            )
+        except Exception as exc:
+            logger.exception("Erro ao atualizar a data do DOC %s: %s", doc_clean, exc)
+            return False
+
+    @staticmethod
+    def _response_status(response: Any) -> Optional[int]:
+        try:
+            payload = response.json()
+            if isinstance(payload, dict) and "status" in payload:
+                return int(payload["status"])
+        except Exception:
+            pass
+        match = re.search(r'"status"\s*:\s*(\d+)', response.text)
+        return int(match.group(1)) if match else None
+
+    def create_soma_payment(
         self,
         doc_id: str,
         data_pagamento: str,
@@ -176,12 +279,7 @@ class AuditService:
         caixa_str: str = "",
         forma_str: str = "",
     ) -> bool:
-        """Insere pagamento para um lançamento 'EM ABERTO' no portal SOMA.
-
-        Navega até o registro, preenche a data com a data da sheet CONTAORDEM do registro
-        em execução, clica em salvar (POST para sys/app/pagamentos.php), valida o popup
-        de sucesso (status 1) e volta para revalidar no SOMA.
-        """
+        """Cria um pagamento único, sem executar baixa nem alterar a data solicitada."""
         doc_clean = normalize_document_value(doc_id)
         if not doc_clean:
             return False
@@ -246,65 +344,131 @@ class AuditService:
 
             url_post = f"{self.base_url}sys/app/pagamentos.php"
             resp = self.http.post(url_post, data=payload)
-            ok = False
+            status = self._response_status(resp)
+            if status == 5:
+                logger.warning("Período de %s fechado para pagamento do DOC %s.", d_norm, doc_clean)
+                return False
             try:
-                res_json = resp.json()
-                if res_json.get("status") == 5:
-                    open_period_date = datetime.now().strftime("%d/%m/%Y")
-                    if d_norm != open_period_date:
-                        logger.warning(
-                            "Mês de %s fechado para pagamento do DOC %s; tentando compensação em %s.",
-                            d_norm,
-                            doc_clean,
-                            open_period_date,
-                        )
-                        d_norm = open_period_date
-                        payload["data_pagamento"] = d_norm
-                        resp = self.http.post(url_post, data=payload)
-                        res_json = resp.json()
-                if res_json.get("status") in (1, 4) or res_json.get("pago") == 1 or res_json.get("status") == 8:
-                    ok = True
-                    logger.info(f"Pagamento para DOC {doc_clean} registrado/verificado no SOMA ({res_json}).")
+                pago = resp.json().get("pago") == 1
             except Exception:
-                if resp.status_code == 200 and ('"status":1' in resp.text or '"pago":1' in resp.text):
-                    ok = True
-
-            if not ok:
-                logger.warning(f"Resposta ao registrar pagamento do DOC {doc_clean}: {resp.text[:150]}")
-
-            # 2. Realizar a baixa do pagamento (sys/app/baixas.php)
-            time.sleep(0.3)
-            r_get2 = self.http.get(url_get)
-            baixas = re.findall(r'class="[^"]*inst_baixa[^"]*"[^>]*id="(\d+)"', r_get2.text)
-            if not baixas:
-                baixas = re.findall(r'id="(\d+)"[^>]*class="[^"]*inst_baixa', r_get2.text)
-
-            for id_baixa in baixas:
-                payload_baixa = {
-                    "id_pagamento_baixa": id_baixa,
-                    "data_baixa": d_norm,
-                    "add": "1",
-                    "aceitar_caixa_negativo": "1",
-                    "num_doc_baixa": "",
-                }
-                r_baixa = self.http.post(f"{self.base_url}sys/app/baixas.php", data=payload_baixa)
-                try:
-                    res_b = r_baixa.json()
-                    if res_b.get("status") in (1, 4):
-                        logger.info(f"Baixa para ID {id_baixa} (DOC {doc_clean}) realizada com sucesso ({res_b}).")
-                except Exception:
-                    pass
-
-            # Voltar e revalidar no SOMA
-            time.sleep(0.5)
-            verify = self.search_by_codigo(doc_clean)
-            if verify and (norm_basic(verify.status) == "pago" or norm_basic(verify.baixa) == "sim"):
-                logger.info(f"DOC {doc_clean} agora está com status PAGO e baixa SIM no SOMA.")
+                pago = '"pago":1' in resp.text
+            if status in (1, 4, 8) or pago:
+                logger.info("Pagamento para DOC %s criado na data %s.", doc_clean, d_norm)
                 return True
-            return ok
-        except Exception as e:
-            logger.exception(f"Erro ao inserir pagamento para DOC {doc_clean} no SOMA: {e}")
+            logger.warning("Resposta ao registrar pagamento do DOC %s: %s", doc_clean, resp.text[:150])
             return False
+        except Exception as e:
+            logger.exception("Erro ao criar pagamento para DOC %s: %s", doc_clean, e)
+            return False
+
+    def insert_soma_baixa(self, doc_id: str, payment_id: str, data_baixa: str) -> bool:
+        """Executa uma única baixa para um pagamento inequivocamente identificado."""
+        payload = {
+            "id_pagamento_baixa": payment_id,
+            "data_baixa": normalize_date_str(data_baixa),
+            "add": "1",
+            "aceitar_caixa_negativo": "1",
+            "num_doc_baixa": "",
+        }
+        response = self.http.post(f"{self.base_url}sys/app/baixas.php", data=payload)
+        if self._response_status(response) in (1, 4):
+            logger.info("Baixa do pagamento do DOC %s concluída.", normalize_document_value(doc_id))
+            return True
+        logger.warning("Baixa do DOC %s rejeitada: %s", normalize_document_value(doc_id), response.text[:150])
+        return False
+
+    def insert_soma_payment(
+        self,
+        doc_id: str,
+        data_pagamento: str,
+        valor: str,
+        caixa_str: str = "",
+        forma_str: str = "",
+    ) -> bool:
+        """Regulariza pagamento e baixa sem duplicar operações já existentes."""
+        doc_clean = normalize_document_value(doc_id)
+        if not doc_clean:
+            return False
+
+        current = self.search_by_codigo(doc_clean)
+        if current is None:
+            return False
+        page_url = f"{self.base_url}?mod=ivv&exec=entradas_saidas_dados&ID={doc_clean}"
+        page = self.http.get(page_url)
+        if page.status_code != 200:
+            return False
+        payment_ids = self._payment_ids(page.text)
+        pending_ids = self._pending_baixa_ids(page.text)
+
+        if norm_basic(current.status) == "pago" and norm_basic(current.baixa) == "sim":
+            return len(payment_ids) <= 1 and not pending_ids
+
+        if len(payment_ids) > 1 or len(pending_ids) > 1:
+            logger.error("DOC %s ambíguo: pagamentos=%d baixas_pendentes=%d", doc_clean, len(payment_ids), len(pending_ids))
+            return False
+
+        if not payment_ids:
+            if pending_ids or not self.create_soma_payment(
+                doc_clean, data_pagamento, valor, caixa_str, forma_str
+            ):
+                return False
+            time.sleep(0.3)
+            page = self.http.get(page_url)
+            payment_ids = self._payment_ids(page.text)
+            pending_ids = self._pending_baixa_ids(page.text)
+            refreshed = self.search_by_codigo(doc_clean)
+            if refreshed is None:
+                return False
+            if norm_basic(refreshed.status) == "pago" and norm_basic(refreshed.baixa) == "sim":
+                return len(payment_ids) == 1 and not pending_ids
+
+        if len(payment_ids) != 1 or pending_ids != payment_ids:
+            logger.error("DOC %s sem associação única entre pagamento e baixa.", doc_clean)
+            return False
+        if not self.insert_soma_baixa(doc_clean, payment_ids[0], data_pagamento):
+            return False
+
+        time.sleep(0.5)
+        verified = self.search_by_codigo(doc_clean)
+        return bool(
+            verified
+            and norm_basic(verified.status) == "pago"
+            and norm_basic(verified.baixa) == "sim"
+        )
+
+    def validate_soma_financial_fields(
+        self,
+        row: ContaOrdemRow,
+        result: Optional[SomaSearchResult],
+    ) -> List[str]:
+        """Valida os cinco campos financeiros sem considerar pagamento ou baixa."""
+        if result is None:
+            return ["Registo não encontrado no portal SOMA"]
+
+        inconsistencias: List[str] = []
+        doc_esperado = normalize_document_value(row.doc_soma)
+        doc_site = normalize_document_value(result.codigo)
+        if not doc_esperado or doc_esperado != doc_site:
+            inconsistencias.append(f"CÓDIGO (col 3): site='{doc_site}' != sheet='{doc_esperado}'")
+
+        if norm_basic(row.tipo.value) != norm_basic(result.tipo):
+            inconsistencias.append(f"TIPO (col 4): site='{result.tipo}' != sheet='{row.tipo.value}'")
+
+        if not row.descricao_soma.strip():
+            inconsistencias.append("DESCRIÇÃO SOMA vazia na CONTAORDEM")
+        elif norm_basic(row.descricao_soma) != norm_basic(result.descricao):
+            inconsistencias.append(f"DESCRIÇÃO (col 5): site='{result.descricao}' != sheet='{norm_basic(row.descricao_soma)}'")
+
+        valor_esperado = clean_amount_for_comparison(row.importancia)
+        valor_site = clean_amount_for_comparison(result.valor)
+        if valor_esperado != valor_site:
+            inconsistencias.append(f"VALOR (col 6): site='{valor_site}' != sheet='{valor_esperado}'")
+
+        data_esperada = normalize_date_str(row.data_mov)
+        data_site = normalize_date_str(result.data)
+        if data_esperada != data_site:
+            inconsistencias.append(f"DATA (col 7): site='{data_site}' != sheet='{data_esperada}'")
+        return inconsistencias
 
     def validate_soma_record(
         self,
@@ -324,32 +488,7 @@ class AuditService:
         if result is None:
             return "Inconsistente", ["Registo não encontrado no portal SOMA"]
 
-        inconsistencias: List[str] = []
-
-        doc_esperado = normalize_document_value(row.doc_soma)
-        doc_site = normalize_document_value(result.codigo)
-        if not doc_esperado or doc_esperado != doc_site:
-            inconsistencias.append(f"CÓDIGO (col 3): site='{doc_site}' != sheet='{doc_esperado}'")
-
-        tipo_esperado = norm_basic(row.tipo.value)
-        tipo_site = norm_basic(result.tipo)
-        if tipo_esperado != tipo_site:
-            inconsistencias.append(f"TIPO (col 4): site='{result.tipo}' != sheet='{row.tipo.value}'")
-
-        desc_esperada = norm_basic(row.descricao_soma or row.descricao)
-        desc_site = norm_basic(result.descricao)
-        if desc_esperada != desc_site:
-            inconsistencias.append(f"DESCRIÇÃO (col 5): site='{result.descricao}' != sheet='{desc_esperada}'")
-
-        valor_esperado = clean_amount_for_comparison(row.importancia)
-        valor_site = clean_amount_for_comparison(result.valor)
-        if valor_esperado != valor_site:
-            inconsistencias.append(f"VALOR (col 6): site='{valor_site}' != sheet='{valor_esperado}'")
-
-        data_esperada = normalize_date_str(row.data_mov)
-        data_site = normalize_date_str(result.data)
-        if data_esperada != data_site:
-            inconsistencias.append(f"DATA (col 7): site='{data_site}' != sheet='{data_esperada}'")
+        inconsistencias = self.validate_soma_financial_fields(row, result)
 
         if norm_basic(result.status) != "pago":
             inconsistencias.append(f"STATUS (col 8): site='{result.status}' != esperado='PAGO'")
@@ -484,7 +623,11 @@ class AuditService:
         if doc_soma and doc_soma.isdigit():
             direct = self.search_by_codigo(doc_soma)
             if direct is not None:
-                if allow_soma_mutation and "EM ABERTO" in (direct.status or "").upper():
+                if (
+                    allow_soma_mutation
+                    and "EM ABERTO" in (direct.status or "").upper()
+                    and not self.validate_soma_financial_fields(row, direct)
+                ):
                     self.insert_soma_payment(
                         doc_id=doc_soma,
                         data_pagamento=row.data_mov,
@@ -533,7 +676,7 @@ class AuditService:
                                     "Linha %s: Lançamento DOC %s em aberto no SOMA. Inserindo pagamento com data %s...",
                                     row.row_number, cand.codigo, row.data_mov,
                                 )
-                                if allow_soma_mutation:
+                                if allow_soma_mutation and not self.validate_soma_financial_fields(row, cand):
                                     self.insert_soma_payment(
                                     doc_id=cand.codigo,
                                     data_pagamento=row.data_mov,
@@ -588,7 +731,7 @@ class AuditService:
                     if "EM ABERTO" in (cand.status or "").upper():
                         cand_val = clean_amount_for_comparison(cand.valor)
                         if cand_val == target_val and norm_basic(cand.tipo) == norm_basic(row.tipo.value):
-                            if allow_soma_mutation:
+                            if allow_soma_mutation and not self.validate_soma_financial_fields(row, cand):
                                 self.insert_soma_payment(
                                 doc_id=cand.codigo,
                                 data_pagamento=row.data_mov,
@@ -674,7 +817,7 @@ class AuditService:
                         "Linha %s: Lançamento DOC %s em aberto no SOMA. Inserindo pagamento com data %s...",
                         row.row_number, doc_soma, row.data_mov,
                     )
-                    if allow_soma_mutation:
+                    if allow_soma_mutation and not self.validate_soma_financial_fields(row, search_result):
                         self.insert_soma_payment(
                         doc_id=doc_soma,
                         data_pagamento=row.data_mov,
