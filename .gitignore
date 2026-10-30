@@ -29,6 +29,8 @@ ENV/
 .env
 *.json
 credentials/*.json
+*.key
+*.key.pub
 !credentials.template.json
 !.vscode/settings.json
 
@@ -39,3 +41,4 @@ artifacts/
 
 # Lock de sessão única do orquestrador
 .orchestrator.lock
+.soma_audit*.lock

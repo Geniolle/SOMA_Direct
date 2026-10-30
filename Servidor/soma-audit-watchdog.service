@@ -1,0 +1,10 @@
+[Unit]
+Description=SOMA audit one-time execution watchdog
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+KillMode=process
+WorkingDirectory=/home/ubuntu/SOMA_Direct
+ExecStart=/home/ubuntu/SOMA_Direct/.venv/bin/python /home/ubuntu/SOMA_Direct/workflows/soma_audit_watchdog.py

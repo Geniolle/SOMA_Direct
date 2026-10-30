@@ -21,6 +21,7 @@ soma-direct = "main:main"
 soma-reconcile = "workflows.reconciliation_cli:main"
 soma-repasse = "workflows.repasse_cli:main"
 soma-checklist = "workflows.monthly_checklist_cli:main"
+soma-audit-batch = "workflows.soma_audit_batch_cli:main"
 
 [tool.setuptools]
 py-modules = ["main"]
@@ -33,3 +34,8 @@ include = ["core*", "config*", "domain*", "services*", "workflows*"]
 dev = [
     "pytest>=9.1.1",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+cache_dir = ".pytest_cache"
