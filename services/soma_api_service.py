@@ -175,6 +175,11 @@ class SomaApiService:
         target = self._norm(centro_name)
         if target in self._centro_custo_map:
             return self._centro_custo_map[target]
+        # Reorganização do plano de centros de custos: um nome antigo que ainda
+        # chegue das folhas de origem resolve para o centro renomeado no SOMA.
+        renamed = self._renamed_cost_centers().get(target)
+        if renamed and renamed in self._centro_custo_map:
+            return self._centro_custo_map[renamed]
         for k, v in self._centro_custo_map.items():
             if target in k or k in target:
                 return v
@@ -189,6 +194,11 @@ class SomaApiService:
             if target and (target in k or k in target):
                 return v
         raise ValueError(f"Forma de pagamento não encontrada no SOMA: '{forma_name}'")
+
+    def _renamed_cost_centers(self) -> Dict[str, str]:
+        from domain.cost_center_plan import label_migration
+
+        return {self._norm(old): self._norm(new) for old, new in label_migration().items()}
 
     def resolve_caixa_id(self, caixa_name: str) -> str:
         self.load_catalogs()
