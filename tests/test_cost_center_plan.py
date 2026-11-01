@@ -143,3 +143,54 @@ def test_real_catalog_snapshot_plan():
     ready_targets = [op.target_code for op in ops if op.status == READY]
     assert len(ready_targets) == len(set(ready_targets))  # nenhum código final duplicado
     assert "20.30.01" in ready_targets and "20.20.02" in ready_targets  # 20.10.08 desdobrado
+
+
+# --- De/para e folhas -----------------------------------------------------------
+
+def test_label_migration_only_renames_and_recodes():
+    from domain.cost_center_plan import label_migration
+
+    de_para = label_migration()
+    assert de_para["10.30.01 - COMISSÕES"] == "20.40.01 - COMISSÕES BANCÁRIAS"
+    assert de_para["20.10.08 - PASTOR PRESIDENTE"] == "20.30.01 - PASTOR PRESIDENTE"
+    assert "PADRÃO" not in de_para
+    assert "10.10.01 - DÍZIMOS E OFERTAS" not in de_para      # preservado (decisão B)
+    assert "20.10.02 - ENERGIA ELÉTRICA" not in de_para       # mantido
+
+
+def test_old_cost_center_name_resolves_to_renamed_center():
+    from types import SimpleNamespace
+    from services.soma_api_service import SomaApiService
+
+    api = SomaApiService(SimpleNamespace(site_base_url="https://x/", institution_id="270"), http=None)
+    api._loaded_catalogs = True
+    api._centro_custo_map = {api._norm("20.40.01 - COMISSÕES BANCÁRIAS"): "6301",
+                             api._norm("10.30.01 - DOAÇÕES E CONTRIBUIÇÕES DIVERSAS"): "9001"}
+    # Nome antigo vindo de uma folha de origem: vai para o centro renomeado, não para o novo 10.30.01.
+    assert api.resolve_centro_custo_id("10.30.01 - COMISSÕES") == "6301"
+
+
+def test_old_name_still_resolves_before_soma_migration():
+    from types import SimpleNamespace
+    from services.soma_api_service import SomaApiService
+
+    api = SomaApiService(SimpleNamespace(site_base_url="https://x/", institution_id="270"), http=None)
+    api._loaded_catalogs = True
+    api._centro_custo_map = {api._norm("10.30.01 - COMISSÕES"): "6301"}
+    assert api.resolve_centro_custo_id("10.30.01 - COMISSÕES") == "6301"
+
+
+def test_sheet_plans_rename_in_place_and_append_new():
+    from scripts.migrate_cost_center_sheets import plan_ccvv, plan_contaordem
+
+    de_para = {"10.30.01 - COMISSÕES": "20.40.01 - COMISSÕES BANCÁRIAS"}
+    ccvv = [["CENTRO DE CUSTO"], ["PADRÃO"], ["10.30.01 - COMISSÕES"]]
+    soma = ["PADRÃO", "20.40.01 - COMISSÕES BANCÁRIAS", "60.20.01 - TRANSFERÊNCIAS ENTRE CONTAS BANCÁRIAS"]
+    updates, appends = plan_ccvv(ccvv, de_para, soma)
+    assert [(u["range"], u["values"][0][0]) for u in updates] == [("A3", "20.40.01 - COMISSÕES BANCÁRIAS")]
+    assert appends == ["60.20.01 - TRANSFERÊNCIAS ENTRE CONTAS BANCÁRIAS"]
+
+    co = [["DATA MOV.", "CENTRO DE CUSTO"], ["01/01/2026", "10.30.01 - COMISSÕES"], ["02/01/2026", "PADRÃO"]]
+    co_updates, counts = plan_contaordem(co, de_para)
+    assert [(u["range"], u["values"][0][0]) for u in co_updates] == [("B2", "20.40.01 - COMISSÕES BANCÁRIAS")]
+    assert plan_contaordem([co[0], ["01/01/2026", "20.40.01 - COMISSÕES BANCÁRIAS"]], de_para)[0] == []  # idempotente

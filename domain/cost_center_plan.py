@@ -187,3 +187,18 @@ MIGRATION_MAP: List[MappingEntry] = [
     MappingEntry("SACERDOTES DA FAMÍLIA [ DEPARTAMENTO ]", RECODE, "50.40.03", "Ver AÇÃO SOCIAL."),
     MappingEntry("MISSÕES VERBO DA VIDA [ DEPARTAMENTO ]", RECODE, "50.50.01", "Ver AÇÃO SOCIAL."),
 ]
+
+
+def label_migration(mapping: List[MappingEntry] = None) -> Dict[str, str]:
+    """De/para de rótulos: rótulo atual -> rótulo novo, só para RENOMEAR/RECODIFICAR.
+
+    Centros PRESERVAR, MANTER e REVISAO_MANUAL não entram: o nome continua válido.
+    """
+    result: Dict[str, str] = {}
+    for entry in (MIGRATION_MAP if mapping is None else mapping):
+        if entry.operation not in (RENAME, RECODE) or not entry.target_code:
+            continue
+        target = TARGET_BY_CODE.get(entry.target_code)
+        if target and target.label != entry.current:
+            result[entry.current] = target.label
+    return result
