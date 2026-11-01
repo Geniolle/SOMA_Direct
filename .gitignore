@@ -39,3 +39,8 @@ artifacts/
 
 # Lock de sessão única do orquestrador
 .orchestrator.lock
+
+# Chaves e ficheiros do servidor (repositório público: nunca versionar)
+Servidor/
+*.key
+*.pem
