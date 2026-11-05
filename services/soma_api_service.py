@@ -313,6 +313,21 @@ class SomaApiService:
                 time.sleep(1)
         return None
 
+    def validar_preparacao(self, row: ContaOrdemRow) -> None:
+        """Resolve os catálogos que o criar_* do mesmo tipo vai usar. Levanta ValueError antes de qualquer POST."""
+        if row.tipo == TipoMovimento.TRANSFERENCIA:
+            self.resolve_caixa_id(row.caixa_saida or "CAIXA DIÁRIO")
+            self.resolve_caixa_id(row.caixa or "CAIXA ECONÓMICA MONTEPIO GERAL [CONTA CORRENTE]")
+            self.resolve_centro_custo_id((row.centro_custo or "PADRÃO").strip() or "PADRÃO")
+            return
+        self.resolve_plano_id(row.plano_conta)
+        self.resolve_centro_custo_id(row.centro_custo)
+        if row.tipo == TipoMovimento.SAIDA:
+            self.resolve_caixa_id(row.caixa or "CAIXA DIÁRIO")
+        else:
+            self.resolve_caixa_id(row.caixa)
+        self.resolve_forma_pagamento_id(row.forma_pagamento)
+
     def criar_saida(self, row: ContaOrdemRow) -> OperationOutcome:
         """Cria Saída diretamente pelo formulário oficial de Entradas/Saídas."""
         t0 = time.perf_counter()

@@ -475,6 +475,14 @@ class AuditService:
             logger.info("Linha %s ignorada: TIPO '%s' não é Entrada ou Saída", row.row_number, row.tipo.value if row.tipo else "")
             return AuditOutcome(analyzed=False, confirmed=True)
 
+        if normalize_document_value(row.doc_soma) == "RESULTADO_DESCONHECIDO":
+            # Envio sem confirmação: só a reconciliação no ledger decide. Nunca corrigir por descrição.
+            return AuditOutcome(
+                analyzed=True,
+                inconsistent=True,
+                inconsistencies=["Resultado desconhecido no envio ao SOMA: reconciliar antes de auditar"],
+            )
+
         doc_soma = normalize_document_value(row.doc_soma)
         target_val = clean_amount_for_comparison(row.importancia)
         target_desc = norm_basic(row.descricao_soma or row.descricao)
@@ -989,6 +997,10 @@ class AuditService:
         used_soma_codes: Optional[set[str]] = None,
         origin_doc: Optional[str] = None,
     ) -> CascadeAuditOutcome:
+        if normalize_document_value(row.doc_soma) == "RESULTADO_DESCONHECIDO":
+            return CascadeAuditOutcome(
+                notes="Resultado desconhecido no envio ao SOMA: reconciliar antes de auditar",
+            )
         """
         Hierarquia de Auditoria e Reconciliação em 4 Níveis:
         Nível 1: Validação Direta por Código (DOC. SOMA)

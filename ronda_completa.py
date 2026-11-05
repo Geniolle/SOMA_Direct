@@ -505,6 +505,13 @@ def run_round(start_date, end_date, apply_changes=False):
             and norm_basic(row.descricao_soma or row.descricao)
             == norm_basic(item.descricao)
         ]
+        if len(exact) == 1 and normalize_document_value(exact[0].doc_soma) == "RESULTADO_DESCONHECIDO":
+            # Envio com resultado desconhecido: o DOC pode ser este. Só reconciliação no ledger decide.
+            stats["inversa_bloqueada"] = stats.get("inversa_bloqueada", 0) + 1
+            reverse_errors.append(
+                f"DOC {doc}: linha {exact[0].row_number} com RESULTADO_DESCONHECIDO; reconciliar no ledger"
+            )
+            continue
         if len(exact) == 1:
             stats["inversa_sem_doc"] += 1
             reverse_errors.append(

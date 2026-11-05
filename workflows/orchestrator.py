@@ -5,11 +5,24 @@ import time
 from collections import defaultdict
 from decimal import Decimal, InvalidOperation
 from dataclasses import replace
+from pathlib import Path
 from typing import List, Optional
 from config.settings import Settings
 from core.auth import SomaAuthenticator
 from core.http_session import ResilientSession
 from core.run_lock import orchestrator_session
+from core.write_gate import escrita_autorizada_pelo_ledger
+from core.operation_ledger import (
+    CONFIRMADO,
+    IdentificacaoInsuficiente,
+    ENVIANDO,
+    LedgerError,
+    NAO_CRIADO as LEDGER_NAO_CRIADO,
+    OperationLedger,
+    RESULTADO_DESCONHECIDO,
+    chave_operacao,
+    resolve_ledger_path,
+)
 from domain.models import (
     AuditOutcome,
     ContaOrdemRow,
@@ -39,7 +52,7 @@ logger = logging.getLogger("soma_direct.orchestrator")
 class DirectOrchestrator:
     """Orquestrador modular e rápido para o SOMA (Backend HTTP Direto)."""
 
-    def __init__(self, settings: Optional[Settings] = None):
+    def __init__(self, settings: Optional[Settings] = None, ledger_path: Optional[Path] = None):
         self.settings = settings or Settings.from_env()
         self.http = ResilientSession(
             timeout=self.settings.timeout_seconds,
@@ -50,6 +63,39 @@ class DirectOrchestrator:
         self.duplicate_checker = DuplicateChecker(self.api)
         self.sheets = GoogleSheetsService(self.settings)
         self.audit_service = AuditService(self.settings, self.http, self.sheets)
+        self.ledger = OperationLedger(ledger_path or resolve_ledger_path())
+
+    # --- Ledger: intenção durável antes de cada POST financeiro -------------
+
+    def _chave(self, row: ContaOrdemRow) -> str:
+        """Chave estável PROCESSO|ID_INTERNO. Levanta IdentificacaoInsuficiente se faltar algum."""
+        return chave_operacao(row.processo, row.id_interno)
+
+    def _bloqueio_envio(self, row: ContaOrdemRow) -> Optional[str]:
+        """Motivo do bloqueio de novo envio, ou None. Falha fechada: sem ledger, sem POST."""
+        if self.ledger.pausa_ativa():
+            return f"lançamentos financeiros pausados ({self.ledger.pausa_path}); remover o ficheiro para retomar"
+        try:
+            chave = self._chave(row)
+        except IdentificacaoInsuficiente as exc:
+            return str(exc)
+        try:
+            reg = self.ledger.obter(chave)
+        except Exception as exc:
+            return f"ledger indisponível ({exc})"
+        if reg and reg.estado in (ENVIANDO, CONFIRMADO, RESULTADO_DESCONHECIDO):
+            return f"operação {chave} bloqueada no ledger (estado {reg.estado}); reconciliar antes de reprocessar"
+        if reg is None and (row.doc_soma or "").strip().upper() == ESTADO_DESCONHECIDO:
+            return "DOC. SOMA marcado RESULTADO_DESCONHECIDO sem registo no ledger; reconciliar antes de reprocessar"
+        return None
+
+    def _registar_resultado(self, chave: str, estado: str, doc_id: str = "", detalhe: str = "") -> bool:
+        try:
+            self.ledger.registar_resultado(chave, estado, doc_id=doc_id, detalhe=detalhe)
+            return True
+        except Exception:
+            logger.critical("Falha ao registar resultado %s para %s no ledger; linha fica bloqueada", estado, chave, exc_info=True)
+            return False
 
     def initialize(self) -> bool:
         """Autentica na sessão HTTP e carrega catálogos de apoio.
@@ -83,11 +129,18 @@ class DirectOrchestrator:
             self.sheets.mark_row_validation_error(row.row_number, validation_error)
             return outcome
 
-        # Linha com resultado desconhecido: nunca enviar novo POST sem reconciliação manual.
-        if (row.doc_soma or "").strip().upper() == ESTADO_DESCONHECIDO:
-            msg = "Resultado desconhecido em execução anterior: reconciliar no SOMA antes de reprocessar"
-            logger.error(f"Linha {row.row_number}: {msg}")
-            return OperationOutcome(False, "", row.tipo.value, row.row_number, 0, error_message=msg, estado=ESTADO_DESCONHECIDO)
+        try:
+            self._chave(row)
+        except IdentificacaoInsuficiente as exc:
+            logger.error(f"Linha {row.row_number}: {exc}")
+            self._marcar_sheet(lambda: self.sheets.mark_row_validation_error(row.row_number, str(exc)), row.row_number)
+            return OperationOutcome(False, "", row.tipo.value, row.row_number, 0, error_message=str(exc))
+
+        # Nunca enviar novo POST para operação com resultado desconhecido ou já confirmada.
+        bloqueio = self._bloqueio_envio(row)
+        if bloqueio:
+            logger.error(f"Linha {row.row_number}: {bloqueio}")
+            return OperationOutcome(False, "", row.tipo.value, row.row_number, 0, error_message=bloqueio, estado=ESTADO_DESCONHECIDO)
 
         claim = self.sheets.claim_row(row.row_number)
         if not claim:
@@ -97,8 +150,21 @@ class DirectOrchestrator:
             return self._process_claimed_row(row)
         except Exception as exc:
             logger.exception("Falha ao processar linha %s", row.row_number)
-            self.sheets.mark_row_failed(row.row_number, str(exc))
-            return OperationOutcome(False, "", row.tipo.value, row.row_number, 0, error_message=str(exc))
+            message = str(exc)
+            # Com envio registado no ledger, EM ERRO liberaria nova tentativa: bloquear em vez disso.
+            try:
+                envio_registado = self.ledger.bloqueado(self._chave(row))
+            except Exception:
+                envio_registado = True
+            try:
+                if envio_registado:
+                    self.sheets.mark_row_unknown(row.row_number, message)
+                else:
+                    self.sheets.mark_row_failed(row.row_number, message)
+            except Exception:
+                logger.critical("Linha %s: não foi possível atualizar a sheet após erro", row.row_number, exc_info=True)
+            estado = ESTADO_DESCONHECIDO if envio_registado else ""
+            return OperationOutcome(False, "", row.tipo.value, row.row_number, 0, error_message=message, estado=estado)
 
     @staticmethod
     def _validate_launch_row(row: ContaOrdemRow) -> Optional[str]:
@@ -278,31 +344,60 @@ class DirectOrchestrator:
             logger.error(f"Linha {row.row_number}: {error_msg}")
             return OperationOutcome(False, "", row.tipo.value, row.row_number, 0, error_message=error_msg)
 
-        # Único ponto de envio: qualquer exceção aqui é tratada pelo estado da operação.
+        chave = self._chave(row)
+
+        # PREPARAÇÃO: resolução de catálogos. Falha aqui é anterior a qualquer intenção: nada foi enviado.
         try:
-            if row.tipo == TipoMovimento.SAIDA:
-                outcome = self.api.criar_saida(row)
-            elif row.tipo == TipoMovimento.ENTRADA:
-                outcome = self.api.criar_entrada(row)
-            else:
-                outcome = self.api.criar_transferencia(row)
-        except ValueError as exc:
-            # Resolução de catálogo (plano, centro de custo, caixa) falha antes do POST.
-            outcome = OperationOutcome(False, "", row.tipo.value, row.row_number, 0, error_message=str(exc), estado=ESTADO_NAO_CRIADO)
+            self.api.validar_preparacao(row)
         except Exception as exc:
-            logger.exception("Linha %s: falha após envio do POST", row.row_number)
+            logger.error("Linha %s: preparação falhou antes do envio: %s", row.row_number, exc)
+            self._marcar_sheet(lambda: self.sheets.mark_row_failed(row.row_number, str(exc)), row.row_number)
+            return OperationOutcome(False, "", row.tipo.value, row.row_number, 0, error_message=str(exc), estado=ESTADO_NAO_CRIADO)
+
+        # INTENÇÃO_PERSISTIDA: ENVIANDO gravado com commit antes do POST. Operação bloqueada não envia.
+        try:
+            self.ledger.registar_envio(chave)
+        except LedgerError as exc:
+            return self._resposta_bloqueada(row, chave, str(exc))
+
+        # ENVIO_INICIADO: a partir daqui, qualquer exceção genérica é RESULTADO_DESCONHECIDO.
+        logger.info("Linha %s fase=ENVIO_INICIADO chave=%s", row.row_number, chave)
+        try:
+            with escrita_autorizada_pelo_ledger():
+                if row.tipo == TipoMovimento.SAIDA:
+                    outcome = self.api.criar_saida(row)
+                elif row.tipo == TipoMovimento.ENTRADA:
+                    outcome = self.api.criar_entrada(row)
+                else:
+                    outcome = self.api.criar_transferencia(row)
+        except Exception as exc:
+            logger.exception("Linha %s: exceção após início do envio", row.row_number)
             outcome = OperationOutcome(False, "", row.tipo.value, row.row_number, 0, error_message=f"Resultado desconhecido após POST: {exc}", estado=ESTADO_DESCONHECIDO)
 
-        # 3. Atualização na planilha Google Sheets
+        # Resultado: só recusa explícita do SOMA é NAO_CRIADO; tudo o resto sem prova é RESULTADO_DESCONHECIDO.
+        if outcome.success:
+            logger.info("Linha %s fase=RESULTADO_CONFIRMADO chave=%s", row.row_number, chave)
+            if not self._registar_resultado(chave, CONFIRMADO, doc_id=outcome.doc_id, detalhe="gravado no SOMA"):
+                return self._falha_registo(row, outcome, chave)
+        elif outcome.estado == ESTADO_NAO_CRIADO:
+            if not self._registar_resultado(chave, LEDGER_NAO_CRIADO, detalhe=outcome.error_message):
+                return self._falha_registo(row, outcome, chave)
+        else:
+            logger.error("Linha %s fase=RESULTADO_DESCONHECIDO chave=%s", row.row_number, chave)
+            outcome.estado = ESTADO_DESCONHECIDO
+            if not self._registar_resultado(chave, RESULTADO_DESCONHECIDO, detalhe=outcome.error_message):
+                return self._falha_registo(row, outcome, chave)
+
+        # 3. Atualização na planilha Google Sheets (falhas aqui não libertam a operação)
         if outcome.success:
             try:
                 confirmation_error = self._confirm_and_settle(row, outcome.doc_id)
                 if confirmation_error:
-                    # DOC já gravado no SOMA: não voltar à fila nem marcar como validado.
+                    # DOC gravado no SOMA: não voltar à fila nem marcar como validado.
                     outcome.success = False
                     outcome.error_message = confirmation_error
                     outcome.estado = ESTADO_DESCONHECIDO
-                    self.sheets.mark_row_unknown(row.row_number, f"{confirmation_error} (DOC {outcome.doc_id})")
+                    self._marcar_sheet(lambda: self.sheets.mark_row_unknown(row.row_number, f"{confirmation_error} (DOC {outcome.doc_id})"), row.row_number)
                     return outcome
                 logger.info(f"-> SUCESSO Linha {row.row_number}: DOC. SOMA={outcome.doc_id} em {outcome.elapsed_ms}ms")
                 self.sheets.mark_row_completed(
@@ -318,14 +413,44 @@ class DirectOrchestrator:
                 outcome.success = False
                 outcome.estado = ESTADO_DESCONHECIDO
                 outcome.error_message = f"DOC {outcome.doc_id} gravado no SOMA; falha ao atualizar a planilha: {exc}"
-                self.sheets.mark_row_unknown(row.row_number, outcome.error_message)
+                self._marcar_sheet(lambda: self.sheets.mark_row_unknown(row.row_number, outcome.error_message), row.row_number)
         elif outcome.estado == ESTADO_DESCONHECIDO:
             logger.error(f"-> RESULTADO DESCONHECIDO Linha {row.row_number}: {outcome.error_message}")
-            self.sheets.mark_row_unknown(row.row_number, outcome.error_message)
+            self._marcar_sheet(lambda: self.sheets.mark_row_unknown(row.row_number, outcome.error_message), row.row_number)
         else:
             logger.error(f"-> ERRO Linha {row.row_number}: {outcome.error_message}")
-            self.sheets.mark_row_failed(row.row_number, outcome.error_message)
+            self._marcar_sheet(lambda: self.sheets.mark_row_failed(row.row_number, outcome.error_message), row.row_number)
 
+        return outcome
+
+    def _marcar_sheet(self, escrita, row_number: int) -> None:
+        try:
+            escrita()
+        except Exception:
+            logger.critical("Linha %s: falha ao atualizar a sheet; o ledger mantém a operação bloqueada", row_number, exc_info=True)
+
+    def _resposta_bloqueada(self, row: ContaOrdemRow, chave: str, motivo: str) -> OperationOutcome:
+        logger.error(f"Linha {row.row_number}: envio bloqueado ({motivo})")
+        try:
+            reg = self.ledger.obter(chave)
+        except Exception:
+            reg = None
+        if reg and reg.estado == CONFIRMADO:
+            # Já gravado no SOMA: apenas sincronizar a sheet, sem POST.
+            self._marcar_sheet(lambda: self.sheets.mark_row_completed(
+                row_idx=row.row_number, doc_id=reg.doc_id, dados_doc=f"Documento {reg.doc_id} recuperado do ledger",
+                elapsed_ms=0, processo=row.processo, id_interno=row.id_interno,
+            ), row.row_number)
+            return OperationOutcome(True, reg.doc_id, row.tipo.value, row.row_number, 0, dados_doc="recuperado do ledger")
+        self._marcar_sheet(lambda: self.sheets.mark_row_unknown(row.row_number, motivo), row.row_number)
+        return OperationOutcome(False, "", row.tipo.value, row.row_number, 0, error_message=motivo, estado=ESTADO_DESCONHECIDO)
+
+    def _falha_registo(self, row: ContaOrdemRow, outcome: OperationOutcome, chave: str) -> OperationOutcome:
+        """Resultado não pôde ser registado no ledger: linha bloqueada, sem EM ERRO."""
+        outcome.success = False
+        outcome.estado = ESTADO_DESCONHECIDO
+        outcome.error_message = f"Resultado do envio não registado no ledger ({chave}): reconciliar antes de reprocessar"
+        self._marcar_sheet(lambda: self.sheets.mark_row_unknown(row.row_number, outcome.error_message), row.row_number)
         return outcome
 
     def run_target_rows(self, row_indices: List[int], dry_run: bool = False) -> List[OperationOutcome]:
@@ -404,6 +529,7 @@ class DirectOrchestrator:
                     r for r in rows
                     if (r.row_number, r.id_interno) not in attempted
                     and self._is_pending(r, stale_seconds)
+                    and self._bloqueio_envio(r) is None
                 ),
                 None,
             )

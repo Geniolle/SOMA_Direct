@@ -5,6 +5,8 @@ import requests
 import urllib3
 from typing import Any, Dict, Optional
 
+from core.write_gate import verificar_escrita
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 logger = logging.getLogger("soma_direct.http")
 
@@ -47,6 +49,8 @@ class ResilientSession:
                 time.sleep(wait)
 
     def post(self, url: str, data: Optional[Any] = None, files: Optional[Any] = None, **kwargs) -> requests.Response:
+        # Barreira financeira: escrita no SOMA só com autorização do ledger e sem pausa.
+        verificar_escrita(url, data)
         kwargs.setdefault("timeout", self.timeout)
         kwargs.setdefault("verify", self.verify_tls)
         # POSTs may create financial records. They are never retried implicitly.

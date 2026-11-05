@@ -39,3 +39,6 @@ artifacts/
 
 # Lock de sessão única do orquestrador
 .orchestrator.lock
+
+# Ledger local de operações financeiras (não versionar)
+state/

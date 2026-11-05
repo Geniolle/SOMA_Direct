@@ -40,6 +40,8 @@ def transfer_row_html(transfer_id, origem, valor, destino, data):
 
 def make_orchestrator(api):
     orch = DirectOrchestrator.__new__(DirectOrchestrator)
+    orch.ledger = MagicMock()  # ledger de operações (testes sem persistência real)
+    orch.ledger.pausa_ativa.return_value = False
     orch.api = api
     orch.sheets = MagicMock()
     orch.audit_service = MagicMock()
@@ -249,6 +251,8 @@ def test_forced_login_discards_expired_session_cookie():
 
 def test_each_cycle_renews_soma_session():
     orch = DirectOrchestrator.__new__(DirectOrchestrator)
+    orch.ledger = MagicMock()  # ledger de operações (testes sem persistência real)
+    orch.ledger.pausa_ativa.return_value = False
     orch.auth = MagicMock()
     orch.api = MagicMock()
 
@@ -293,6 +297,8 @@ def test_completed_row_rejects_old_trf_format(doc_id):
 
 def make_pending_orchestrator(rows, fresh=None, fail_rows=()):
     orch = DirectOrchestrator.__new__(DirectOrchestrator)
+    orch.ledger = MagicMock()  # ledger de operações (testes sem persistência real)
+    orch.ledger.pausa_ativa.return_value = False
     orch.settings = SimpleNamespace(claim_stale_seconds=900, run_caixas_bancos=False, run_soma_sheet=False)
     orch.auth = MagicMock()
     orch.api = MagicMock()

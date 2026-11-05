@@ -1,11 +1,19 @@
 """Idempotência das gravações financeiras: CONFIRMADO / NAO_CRIADO / RESULTADO_DESCONHECIDO."""
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from core.operation_ledger import OperationLedger
+from core.operation_ledger import RESULTADO_DESCONHECIDO
 from domain.models import ESTADO_DESCONHECIDO, ESTADO_NAO_CRIADO, OperationOutcome, TipoMovimento
 from services.soma_api_service import SomaApiService
 from workflows.orchestrator import DirectOrchestrator
 from tests.test_input_flows import make_row
+
+
+def _ok(doc="5654059"):
+    return OperationOutcome(True, doc, "Saída", 7, 10, dados_doc="x")
 
 
 def _api(text, status_code=200, find_doc=None):
@@ -90,6 +98,7 @@ def _orch(api_outcome=None, api_exc=None):
     orch.audit_service = MagicMock()
     orch.audit_service.search_by_descricao.return_value = []
     orch.api = MagicMock()
+    orch.ledger = OperationLedger.inicializar(Path(tempfile.mkdtemp()) / "ledger.sqlite3")
     if api_exc is not None:
         orch.api.criar_saida.side_effect = api_exc
     else:
@@ -105,12 +114,23 @@ def test_excecao_apos_envio_marca_linha_como_desconhecida_e_nao_em_erro():
     orch.sheets.mark_row_failed.assert_not_called()
 
 
-def test_erro_de_catalogo_antes_do_post_permite_nova_tentativa():
-    orch = _orch(api_exc=ValueError("Plano de conta não encontrado no SOMA"))
+def test_erro_de_catalogo_na_preparacao_permite_nova_tentativa():
+    orch = _orch(api_outcome=_ok())
+    orch.api.validar_preparacao.side_effect = ValueError("Plano de conta não encontrado no SOMA")
     out = orch._process_claimed_row(make_row(tipo=TipoMovimento.SAIDA))
     assert out.estado == ESTADO_NAO_CRIADO
+    orch.api.criar_saida.assert_not_called()
     orch.sheets.mark_row_failed.assert_called_once()
     orch.sheets.mark_row_unknown.assert_not_called()
+
+
+def test_valueerror_depois_de_iniciar_post_e_desconhecido():
+    orch = _orch(api_exc=ValueError("resposta inesperada"))
+    out = orch._process_claimed_row(make_row(tipo=TipoMovimento.SAIDA))
+    assert out.estado == ESTADO_DESCONHECIDO
+    orch.sheets.mark_row_failed.assert_not_called()
+    orch.sheets.mark_row_unknown.assert_called_once()
+    assert orch.ledger.obter("T_EXTRATO|EXT001").estado == RESULTADO_DESCONHECIDO
 
 
 def test_sucesso_sem_confirmacao_nao_fica_validado():
