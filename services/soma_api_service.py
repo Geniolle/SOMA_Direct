@@ -10,6 +10,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from config.settings import Settings
 from core.http_session import ResilientSession
 from domain.models import (
+    ESTADO_DESCONHECIDO,
+    ESTADO_NAO_CRIADO,
     ContaOrdemRow,
     OperationOutcome,
     SomaTransfer,
@@ -158,6 +160,11 @@ class SomaApiService:
             return int((data or {}).get("status"))
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _estado_falha(status: Optional[int]) -> str:
+        """Status JSON diferente de 1 é recusa explícita (NAO_CRIADO). Sem JSON válido, o POST pode ter sido aceite."""
+        return ESTADO_NAO_CRIADO if status is not None else ESTADO_DESCONHECIDO
 
     def resolve_plano_id(self, plano_name: str) -> str:
         self.load_catalogs()
@@ -343,7 +350,7 @@ class SomaApiService:
         if status != 1:
             message = f"SOMA recusou a gravação da Saída (status={status})" if status is not None else (self._http_error(resp) or "Resposta inválida do SOMA ao gravar")
             logger.error("Saída linha %s: %s | resposta=%s | %s", row.row_number, message, data, self._describe_response(resp))
-            return OperationOutcome(False, "", "Saída", row.row_number, int((time.perf_counter() - t0) * 1000), error_message=message)
+            return OperationOutcome(False, "", "Saída", row.row_number, int((time.perf_counter() - t0) * 1000), error_message=message, estado=self._estado_falha(status))
 
         # O SOMA devolve o ID do documento (usado no link ?ID=); confirma pela pesquisa se faltar.
         doc_id = str((data or {}).get("id") or "").strip()
@@ -353,7 +360,7 @@ class SomaApiService:
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
         if not doc_id:
             logger.error("Saída linha %s gravada (status 1) mas sem DOC identificado: resposta=%s", row.row_number, data)
-            return OperationOutcome(False, "", "Saída", row.row_number, elapsed_ms, error_message="SOMA gravou o documento, mas o DOC não foi identificado de forma inequívoca")
+            return OperationOutcome(False, "", "Saída", row.row_number, elapsed_ms, error_message="SOMA gravou o documento, mas o DOC não foi identificado de forma inequívoca", estado=ESTADO_DESCONHECIDO)
 
         dados_doc = f"Registrado(a) em: {time.strftime('%d/%m/%Y %H:%M:%S')}, {row.caixa}, {row.forma_pagamento}. Baixa realizada por {self.settings.user_job_id}"
         return OperationOutcome(
@@ -398,7 +405,7 @@ class SomaApiService:
         if status != 1:
             message = f"SOMA recusou a gravação da Entrada (status={status})" if status is not None else (self._http_error(resp) or "Resposta inválida do SOMA ao gravar")
             logger.error("Entrada linha %s: %s | resposta=%s | %s", row.row_number, message, data, self._describe_response(resp))
-            return OperationOutcome(False, "", "Entrada", row.row_number, int((time.perf_counter() - t0) * 1000), error_message=message)
+            return OperationOutcome(False, "", "Entrada", row.row_number, int((time.perf_counter() - t0) * 1000), error_message=message, estado=self._estado_falha(status))
 
         # O SOMA devolve o ID do documento (usado no link ?ID=); confirma pela pesquisa se faltar.
         doc_id = str((data or {}).get("id") or "").strip()
@@ -408,7 +415,7 @@ class SomaApiService:
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
         if not doc_id:
             logger.error("Entrada linha %s gravada (status 1) mas sem DOC identificado: resposta=%s", row.row_number, data)
-            return OperationOutcome(False, "", "Entrada", row.row_number, elapsed_ms, error_message="SOMA gravou o documento, mas o DOC não foi identificado de forma inequívoca")
+            return OperationOutcome(False, "", "Entrada", row.row_number, elapsed_ms, error_message="SOMA gravou o documento, mas o DOC não foi identificado de forma inequívoca", estado=ESTADO_DESCONHECIDO)
 
         dados_doc = f"Registrado(a) em: {time.strftime('%d/%m/%Y %H:%M:%S')}, {row.caixa}, {row.forma_pagamento}. Baixa realizada por {self.settings.user_job_id}"
         return OperationOutcome(
@@ -459,7 +466,7 @@ class SomaApiService:
                 else (self._http_error(resp) or "Resposta inválida do SOMA ao gravar a transferência")
             )
             logger.error("Transferência linha %s: %s | resposta=%s | %s", row.row_number, message, data, self._describe_response(resp))
-            return OperationOutcome(False, "", "Transferência", row.row_number, int((time.perf_counter() - t0) * 1000), error_message=message)
+            return OperationOutcome(False, "", "Transferência", row.row_number, int((time.perf_counter() - t0) * 1000), error_message=message, estado=self._estado_falha(status))
 
         # Gravação confirmada pelo SOMA (status 1). Identifica o ID para DADOS DOC.
         new_ids: List[str] = []

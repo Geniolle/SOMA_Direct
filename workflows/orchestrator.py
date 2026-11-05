@@ -13,6 +13,8 @@ from core.run_lock import orchestrator_session
 from domain.models import (
     AuditOutcome,
     ContaOrdemRow,
+    ESTADO_DESCONHECIDO,
+    ESTADO_NAO_CRIADO,
     OperationOutcome,
     TipoMovimento,
     PROCESSABLE_TYPES,
@@ -80,6 +82,12 @@ class DirectOrchestrator:
             outcome = OperationOutcome(False, "", row.tipo.value, row.row_number, 0, error_message=validation_error)
             self.sheets.mark_row_validation_error(row.row_number, validation_error)
             return outcome
+
+        # Linha com resultado desconhecido: nunca enviar novo POST sem reconciliação manual.
+        if (row.doc_soma or "").strip().upper() == ESTADO_DESCONHECIDO:
+            msg = "Resultado desconhecido em execução anterior: reconciliar no SOMA antes de reprocessar"
+            logger.error(f"Linha {row.row_number}: {msg}")
+            return OperationOutcome(False, "", row.tipo.value, row.row_number, 0, error_message=msg, estado=ESTADO_DESCONHECIDO)
 
         claim = self.sheets.claim_row(row.row_number)
         if not claim:
@@ -265,34 +273,55 @@ class DirectOrchestrator:
             self.sheets.mark_row_validation_error(row.row_number, error_msg)
             return OperationOutcome(False, "", row.tipo.value, row.row_number, 0, error_message=error_msg)
 
-        if row.tipo == TipoMovimento.SAIDA:
-            outcome = self.api.criar_saida(row)
-        elif row.tipo == TipoMovimento.ENTRADA:
-            outcome = self.api.criar_entrada(row)
-        elif row.tipo == TipoMovimento.TRANSFERENCIA:
-            outcome = self.api.criar_transferencia(row)
-        else:
+        if row.tipo not in (TipoMovimento.SAIDA, TipoMovimento.ENTRADA, TipoMovimento.TRANSFERENCIA):
             error_msg = f"Tipo não tratado: {row.tipo.value}"
             logger.error(f"Linha {row.row_number}: {error_msg}")
             return OperationOutcome(False, "", row.tipo.value, row.row_number, 0, error_message=error_msg)
 
+        # Único ponto de envio: qualquer exceção aqui é tratada pelo estado da operação.
+        try:
+            if row.tipo == TipoMovimento.SAIDA:
+                outcome = self.api.criar_saida(row)
+            elif row.tipo == TipoMovimento.ENTRADA:
+                outcome = self.api.criar_entrada(row)
+            else:
+                outcome = self.api.criar_transferencia(row)
+        except ValueError as exc:
+            # Resolução de catálogo (plano, centro de custo, caixa) falha antes do POST.
+            outcome = OperationOutcome(False, "", row.tipo.value, row.row_number, 0, error_message=str(exc), estado=ESTADO_NAO_CRIADO)
+        except Exception as exc:
+            logger.exception("Linha %s: falha após envio do POST", row.row_number)
+            outcome = OperationOutcome(False, "", row.tipo.value, row.row_number, 0, error_message=f"Resultado desconhecido após POST: {exc}", estado=ESTADO_DESCONHECIDO)
+
         # 3. Atualização na planilha Google Sheets
         if outcome.success:
-            confirmation_error = self._confirm_and_settle(row, outcome.doc_id)
-            if confirmation_error:
+            try:
+                confirmation_error = self._confirm_and_settle(row, outcome.doc_id)
+                if confirmation_error:
+                    # DOC já gravado no SOMA: não voltar à fila nem marcar como validado.
+                    outcome.success = False
+                    outcome.error_message = confirmation_error
+                    outcome.estado = ESTADO_DESCONHECIDO
+                    self.sheets.mark_row_unknown(row.row_number, f"{confirmation_error} (DOC {outcome.doc_id})")
+                    return outcome
+                logger.info(f"-> SUCESSO Linha {row.row_number}: DOC. SOMA={outcome.doc_id} em {outcome.elapsed_ms}ms")
+                self.sheets.mark_row_completed(
+                    row_idx=row.row_number,
+                    doc_id=outcome.doc_id,
+                    dados_doc=outcome.dados_doc,
+                    elapsed_ms=outcome.elapsed_ms,
+                    processo=row.processo,
+                    id_interno=row.id_interno,
+                )
+            except Exception as exc:
+                logger.exception("Linha %s: DOC %s gravado, mas a planilha não foi atualizada", row.row_number, outcome.doc_id)
                 outcome.success = False
-                outcome.error_message = confirmation_error
-                self.sheets.mark_row_failed(row.row_number, confirmation_error)
-                return outcome
-            logger.info(f"-> SUCESSO Linha {row.row_number}: DOC. SOMA={outcome.doc_id} em {outcome.elapsed_ms}ms")
-            self.sheets.mark_row_completed(
-                row_idx=row.row_number,
-                doc_id=outcome.doc_id,
-                dados_doc=outcome.dados_doc,
-                elapsed_ms=outcome.elapsed_ms,
-                processo=row.processo,
-                id_interno=row.id_interno,
-            )
+                outcome.estado = ESTADO_DESCONHECIDO
+                outcome.error_message = f"DOC {outcome.doc_id} gravado no SOMA; falha ao atualizar a planilha: {exc}"
+                self.sheets.mark_row_unknown(row.row_number, outcome.error_message)
+        elif outcome.estado == ESTADO_DESCONHECIDO:
+            logger.error(f"-> RESULTADO DESCONHECIDO Linha {row.row_number}: {outcome.error_message}")
+            self.sheets.mark_row_unknown(row.row_number, outcome.error_message)
         else:
             logger.error(f"-> ERRO Linha {row.row_number}: {outcome.error_message}")
             self.sheets.mark_row_failed(row.row_number, outcome.error_message)

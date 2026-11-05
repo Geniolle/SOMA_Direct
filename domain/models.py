@@ -268,6 +268,14 @@ class AuditOutcome:
     dados_doc: str = ""
 
 
+# Estado de uma operação de gravação no SOMA (ver workflows/orchestrator.py).
+# CONFIRMADO: gravação comprovada. NAO_CRIADO: SOMA recusou explicitamente (nada gravado).
+# RESULTADO_DESCONHECIDO: pedido enviado sem confirmação conclusiva; nunca repetir automaticamente.
+ESTADO_CONFIRMADO = "CONFIRMADO"
+ESTADO_NAO_CRIADO = "NAO_CRIADO"
+ESTADO_DESCONHECIDO = "RESULTADO_DESCONHECIDO"
+
+
 @dataclass
 class OperationOutcome:
     success: bool
@@ -277,6 +285,7 @@ class OperationOutcome:
     elapsed_ms: int
     dados_doc: str = ""
     error_message: str = ""
+    estado: str = ""
 
 
 @dataclass

@@ -740,6 +740,25 @@ class GoogleSheetsService:
         if updates:
             self._ws.batch_update(updates)
 
+    def mark_row_unknown(self, row_idx: int, message: str) -> None:
+        """POST enviado sem confirmação conclusiva: bloqueia a linha (DOC. SOMA preenchido, fora da fila).
+
+        Só sai deste estado por reconciliação manual no SOMA (leitura) e alteração explícita da sheet.
+        """
+        headers = self.get_headers()
+        header_map = {norm_basic(h): i + 1 for i, h in enumerate(headers)}
+        updates = []
+        for name, value in (
+            ("DOC. SOMA", "RESULTADO_DESCONHECIDO"),
+            ("STATUS", "RESULTADO DESCONHECIDO"),
+            ("DADOS DOC", str(message)[:450]),
+        ):
+            col = header_map.get(norm_basic(name))
+            if col:
+                updates.append({"range": f"{self._col_letter(col)}{row_idx}", "values": [[value]]})
+        if updates:
+            self._ws.batch_update(updates)
+
     def mark_row_validation_error(self, row_idx: int, message: str) -> None:
         """Marca uma linha inválida para análise humana, sem acessar o SOMA."""
         headers = self.get_headers()
