@@ -46,3 +46,8 @@ artifacts/
 # Scripts de deploy com dados de infraestrutura (não publicar)
 deploy_comando.sh
 Servidor/deploy_server.ps1
+
+# Chaves e ficheiros do servidor (repositório público: nunca versionar)
+Servidor/
+*.key
+*.pem

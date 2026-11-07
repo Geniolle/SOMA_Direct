@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 from services.soma_api_service import SomaApiService
@@ -7,7 +8,7 @@ class _Resp:
     def __init__(self, status_code=200, body=None, text=""):
         self.status_code = status_code
         self._body = body
-        self.text = text
+        self.text = text or (json.dumps(body) if body is not None else "")
         self.url = ""
 
     def json(self):
@@ -34,6 +35,7 @@ def _service(resp, transfers_before=(), transfers_after=()):
     http = _Http(resp)
     svc = SomaApiService(settings, http)
     svc.resolve_caixa_id = lambda name: "1230" if "DI" in name else "1226"
+    svc.resolve_centro_custo_id = lambda name: "CC-TESTE"
     seq = iter([list(transfers_before), list(transfers_after)])
     svc.find_transfers = lambda row: (next(seq), [])
     svc._confirmation_attempts = 1
@@ -42,7 +44,7 @@ def _service(resp, transfers_before=(), transfers_after=()):
 
 def _row():
     return SimpleNamespace(row_number=3752, importancia="520,00", data_mov="05/11/2026",
-                           caixa_saida="CAIXA DIÁRIO", caixa="CAIXA ECONÓMICA", descricao_soma="", descricao="X")
+                           caixa_saida="CAIXA DIÁRIO", caixa="CAIXA ECONÓMICA", descricao_soma="", descricao="X", centro_custo="")
 
 
 def test_transferencia_posta_no_endpoint_ajax_do_formulario():
