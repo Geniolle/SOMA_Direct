@@ -42,3 +42,7 @@ artifacts/
 # Lock de sessão única do orquestrador
 .orchestrator.lock
 .soma_audit*.lock
+
+# Scripts de deploy com dados de infraestrutura (não publicar)
+deploy_comando.sh
+Servidor/deploy_server.ps1
