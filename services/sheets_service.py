@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 import uuid
@@ -46,6 +47,9 @@ EXTERNAL_SOURCE_SPREADSHEET_URL = (
 )
 
 
+VERBO_SHOP_SPREADSHEET_URL = os.getenv("VERBO_SHOP_SPREADSHEET_URL") or None
+
+
 def build_default_origin_registry(
     default_spreadsheet_url: Optional[str] = None,
     app_verbo_cafe_url: Optional[str] = None,
@@ -58,6 +62,8 @@ def build_default_origin_registry(
         OriginConfig(processo="Financeiro", sheet_name="Financeiro", spreadsheet_url=verbo_cafe_url),
         OriginConfig(processo="VC_VENDAS", sheet_name="VC_VENDAS", spreadsheet_url=verbo_cafe_url),
     ]
+    if VERBO_SHOP_SPREADSHEET_URL:  # sem env var, a origem VERBO_SHOP fica desativada
+        configs.append(OriginConfig(processo="VERBO_SHOP", sheet_name="DB_VENDAS", spreadsheet_url=VERBO_SHOP_SPREADSHEET_URL))
     registry: Dict[str, OriginConfig] = {}
     for cfg in configs:
         registry[norm_basic(cfg.processo)] = cfg
