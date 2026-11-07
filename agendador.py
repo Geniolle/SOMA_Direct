@@ -14,8 +14,29 @@ BASE_DIR = Path(__file__).resolve().parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-from main import setup_logging
 from workflows.orchestrator import DirectOrchestrator
+from config.paths import PROJECT_ROOT
+
+
+def setup_agendador_logging(overwrite: bool = True):
+    log_dir = PROJECT_ROOT / "logs"
+    log_dir.mkdir(exist_ok=True)
+    log_file = log_dir / "last_run.log"
+
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+    # mode='w' assegura que não guardamos histórico acumulado no disco da VM
+    file_handler = logging.FileHandler(log_file, mode="w" if overwrite else "a", encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    file_handler.setLevel(logging.INFO)
+
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setFormatter(formatter)
+    stream_handler.setLevel(logging.INFO)
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.handlers = [file_handler, stream_handler]
 
 
 running = True
@@ -63,7 +84,7 @@ def run_cycle(orchestrator: DirectOrchestrator, run_maintenance: bool = False) -
 
 def main():
     global running
-    setup_logging()
+    setup_agendador_logging()
 
     parser = argparse.ArgumentParser(description="Agendador de Produção do SOMA Direct")
     parser.add_argument("--once", action="store_true", help="Executa apenas uma ronda e sai")
