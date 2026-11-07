@@ -364,6 +364,15 @@ class SomaApiService:
             dados_doc=dados_doc
         )
 
+    # Códigos de status devolvidos por sys/app/transferencias_caixas.php (ver themes/js/transferencias_caixas_dados.js).
+    _TRANSFER_STATUS_MSG = {
+        2: "SOMA: nenhuma operação foi realizada",
+        5: "SOMA: o caixa de origem não tem o valor solicitado",
+        6: "SOMA: mês fechado, transferência não permitida",
+        10: "SOMA: transferência recusada (ver mensagem do portal)",
+        14: "SOMA: um dos caixas está oculto ou excluído",
+    }
+
     def criar_transferencia(self, row: ContaOrdemRow) -> OperationOutcome:
         """Cria Transferência diretamente pelo formulário de Transferências de Caixas."""
         t0 = time.perf_counter()
@@ -387,12 +396,21 @@ class SomaApiService:
         # por "primeira transferência" da tabela.
         before_ids = {t.transfer_id for t in self.find_transfers(row)[0]}
 
-        url = f"{self.base_url}?mod=ivv&exec=transferencias_caixas_dados"
-        resp = self.http.post(url, data=payload)
+        # Mesmo endpoint AJAX que o formulário do SOMA usa (themes/js/transferencias_caixas_dados.js).
+        url = f"{self.base_url}sys/app/transferencias_caixas.php"
+        resp = self.http.post_ajax(url, data=payload)
         http_error = self._http_error(resp)
         if http_error:
             logger.error("Transferência linha %s: %s | %s", row.row_number, http_error, self._describe_response(resp))
             return OperationOutcome(False, "", "Transferência", row.row_number, int((time.perf_counter() - t0) * 1000), error_message=http_error)
+        try:
+            status = int(resp.json().get("status", 0))
+        except (ValueError, AttributeError):
+            status = 0
+        if status != 1:
+            message = self._TRANSFER_STATUS_MSG.get(status, f"SOMA recusou a transferência (status={status})")
+            logger.error("Transferência linha %s recusada pelo SOMA: status=%s | %s", row.row_number, status, self._describe_response(resp))
+            return OperationOutcome(False, "", "Transferência", row.row_number, int((time.perf_counter() - t0) * 1000), error_message=message)
 
         new_exact: List[SomaTransfer] = []
         new_any: List[SomaTransfer] = []

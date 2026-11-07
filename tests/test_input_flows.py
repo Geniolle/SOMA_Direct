@@ -94,7 +94,12 @@ def make_soma_api(pages):
     """SomaApiService com HTTP falso: ``pages`` é uma lista de respostas da pesquisa."""
     http = MagicMock()
     responses = iter(pages)
-    http.post_ajax.side_effect = lambda *a, **k: SimpleNamespace(status_code=200, text=next(responses))
+    def _ajax(url, *a, **k):
+        if url.endswith("sys/app/transferencias_caixas.php"):  # criação: status 1 = salvo
+            return SimpleNamespace(status_code=200, text="", json=lambda: {"status": 1})
+        return SimpleNamespace(status_code=200, text=next(responses))
+
+    http.post_ajax.side_effect = _ajax
     http.post.return_value = SimpleNamespace(status_code=200, text="<html><script>x.onerror=1</script>ok</html>", url="u")
     settings = SimpleNamespace(site_base_url="https://example.test/IVV", institution_id="1", user_job_id="J")
     api = SomaApiService(settings, http)
